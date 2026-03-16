@@ -49,10 +49,9 @@ def _build_parser() -> argparse.ArgumentParser:
         description="Download media from a Tumblr blog or tag search.",
     )
     parser.add_argument(
-        "blog_name",
-        nargs="?",
-        default=None,
-        help="The Tumblr blog name (e.g. 'example'). Optional with --tag.",
+        "blog_names",
+        nargs="*",
+        help="One or more Tumblr blog names (e.g. 'blog1 blog2'). Optional with --tag.",
     )
     parser.add_argument(
         "--output-dir",
@@ -494,13 +493,24 @@ async def _download_tagged(
     return stats
 
 
+def _merge_stats(target: DownloadStats, source: DownloadStats) -> None:
+    """Merge source stats into target in-place."""
+    for mt in MediaType:
+        target.found[mt] += source.found[mt]
+        target.downloaded[mt] += source.downloaded[mt]
+        target.skipped[mt] += source.skipped[mt]
+        target.failed[mt] += source.failed[mt]
+    target.posts_processed += source.posts_processed
+
+
 async def _run(args: argparse.Namespace) -> int:
     """Execute the download workflow. Returns exit code."""
     _configure_logging(args.debug)
 
     # Validate arguments.
-    if not args.tag and not args.blog_name:
-        logger.error("blog_name is required unless --tag is specified.")
+    blog_names: list[str] = args.blog_names or []
+    if not args.tag and not blog_names:
+        logger.error("At least one blog_name is required unless --tag is specified.")
         return _EXIT_CONFIG
 
     output_dir = Path(args.output_dir)
@@ -513,19 +523,6 @@ async def _run(args: argparse.Namespace) -> int:
 
     try:
         async with TumblrClient(args.config) as client:
-            if args.tag:
-                logger.info(
-                    "Starting tag search for '%s' to %s",
-                    args.tag,
-                    output_dir,
-                )
-            else:
-                logger.info(
-                    "Starting download from %s to %s",
-                    args.blog_name,
-                    output_dir,
-                )
-
             # Set up tracker and dedup strategy.
             if args.no_db:
                 tracker = None
@@ -539,11 +536,16 @@ async def _run(args: argparse.Namespace) -> int:
                 dedup = SqliteDedup(tracker)
 
             try:
-                stats = DownloadStats()
+                total_stats = DownloadStats()
 
                 if args.tag:
                     # Tag search mode.
-                    stats = await _download_tagged(
+                    logger.info(
+                        "Starting tag search for '%s' to %s",
+                        args.tag,
+                        output_dir,
+                    )
+                    total_stats = await _download_tagged(
                         client=client,
                         tag=args.tag,
                         output_dir=output_dir,
@@ -554,41 +556,60 @@ async def _run(args: argparse.Namespace) -> int:
                         exclude_blog_patterns=exclude_blog_patterns,
                     )
                 else:
-                    # Blog download mode.
-                    # Retry previously failed downloads if requested.
-                    if args.retry_failed and tracker:
-                        await _retry_failed_downloads(
-                            tracker, args.blog_name, output_dir, dedup, stats
+                    # Blog download mode — process each blog sequentially.
+                    for i, blog_name in enumerate(blog_names):
+                        if len(blog_names) > 1:
+                            logger.info(
+                                "--- Blog %d/%d: %s ---",
+                                i + 1,
+                                len(blog_names),
+                                blog_name,
+                            )
+                        logger.info(
+                            "Starting download from %s to %s",
+                            blog_name,
+                            output_dir,
                         )
 
-                    # Main download loop.
-                    main_stats = await _download_blog(
-                        client=client,
-                        blog_name=args.blog_name,
-                        output_dir=output_dir,
-                        dedup=dedup,
-                        tracker=tracker,
-                        start_offset=args.start_post,
-                        max_posts=args.max_posts,
-                        full_scan=args.full_scan,
-                        exclude_patterns=exclude_patterns,
-                        exclude_blog_patterns=exclude_blog_patterns,
-                    )
+                        retry_stats = DownloadStats()
+                        if args.retry_failed and tracker:
+                            await _retry_failed_downloads(
+                                tracker, blog_name, output_dir, dedup, retry_stats
+                            )
 
-                    # Merge stats from retry pass into main stats.
-                    for mt in MediaType:
-                        main_stats.found[mt] += stats.found[mt]
-                        main_stats.downloaded[mt] += stats.downloaded[mt]
-                        main_stats.skipped[mt] += stats.skipped[mt]
-                        main_stats.failed[mt] += stats.failed[mt]
+                        blog_stats = await _download_blog(
+                            client=client,
+                            blog_name=blog_name,
+                            output_dir=output_dir,
+                            dedup=dedup,
+                            tracker=tracker,
+                            start_offset=args.start_post,
+                            max_posts=args.max_posts,
+                            full_scan=args.full_scan,
+                            exclude_patterns=exclude_patterns,
+                            exclude_blog_patterns=exclude_blog_patterns,
+                        )
 
-                    stats = main_stats
+                        # Merge retry stats into this blog's stats.
+                        _merge_stats(blog_stats, retry_stats)
+
+                        if len(blog_names) > 1:
+                            logger.info(
+                                "  %s: %d posts, %d downloaded",
+                                blog_name,
+                                blog_stats.posts_processed,
+                                sum(blog_stats.downloaded.values()),
+                            )
+
+                        # Accumulate into total.
+                        _merge_stats(total_stats, blog_stats)
+
             finally:
                 if tracker:
                     await tracker.close()
 
-            stats.api_calls = client.api_calls
-            stats.rate_limit = client._rate_limit
+            total_stats.api_calls = client.api_calls
+            total_stats.rate_limit = client._rate_limit
 
     except ConfigError as exc:
         logger.error("%s", exc)
@@ -597,8 +618,8 @@ async def _run(args: argparse.Namespace) -> int:
         logger.error("API error: %s", exc)
         return _EXIT_RUNTIME
 
-    stats.elapsed_seconds = time.monotonic() - start_time
-    logger.info("\n%s", stats.summary())
+    total_stats.elapsed_seconds = time.monotonic() - start_time
+    logger.info("\n%s", total_stats.summary())
     return _EXIT_OK
 
 

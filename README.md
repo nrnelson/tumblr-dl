@@ -55,14 +55,14 @@ To obtain these credentials:
 ## Usage
 
 ```bash
-tumblr-dl <blog_name> [options]
+tumblr-dl <blog_name> [blog_name ...] [options]
 ```
 
 ### Arguments
 
 | Argument | Description |
 |----------|-------------|
-| `blog_name` | The Tumblr blog name (e.g. `example` for example.tumblr.com). Optional with `--tag`. |
+| `blog_name` | One or more Tumblr blog names (e.g. `blog1 blog2`). Optional with `--tag`. |
 
 ### Options
 
@@ -87,6 +87,12 @@ Download all media from a blog (saves to `tumblr_downloads/`):
 
 ```bash
 tumblr-dl myblog
+```
+
+Download multiple blogs at once:
+
+```bash
+tumblr-dl blog1 blog2 blog3
 ```
 
 Download to a custom directory:
