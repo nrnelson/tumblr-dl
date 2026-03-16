@@ -138,15 +138,13 @@ class TumblrClient:
     async def _request_with_retry(
         self,
         url: str,
-        blog_name: str,
-        offset: int,
+        error_context: dict[str, Any] | None = None,
     ) -> Any:
         """Make a rate-limited API request with 429 backoff/retry.
 
         Args:
             url: The full API URL (with query params).
-            blog_name: Blog name for error context.
-            offset: Pagination offset for error context.
+            error_context: Extra context dict for ApiError messages.
 
         Returns:
             The parsed JSON response.
@@ -154,6 +152,7 @@ class TumblrClient:
         Raises:
             ApiError: After all retries are exhausted or on non-429 errors.
         """
+        ctx = error_context or {}
         last_exc: Exception | None = None
 
         for attempt in range(_RETRY_MAX_ATTEMPTS):
@@ -180,11 +179,7 @@ class TumblrClient:
                 )
                 last_exc = ApiError(
                     "API returned 429",
-                    context={
-                        "blog": blog_name,
-                        "offset": offset,
-                        "status_code": 429,
-                    },
+                    context={**ctx, "status_code": 429},
                 )
                 await asyncio.sleep(delay)
                 continue
@@ -195,11 +190,7 @@ class TumblrClient:
                 status = getattr(getattr(exc, "response", None), "status_code", None)
                 raise ApiError(
                     f"API returned {status or response.status_code}",
-                    context={
-                        "blog": blog_name,
-                        "offset": offset,
-                        "status_code": status or response.status_code,
-                    },
+                    context={**ctx, "status_code": status or response.status_code},
                 ) from exc
 
             return response.json()
@@ -227,16 +218,19 @@ class TumblrClient:
             ApiError: If the API request fails or response is malformed.
         """
         hostname = _normalize_blog_name(blog_name)
-        url = f"{_API_BASE}/blog/{hostname}/posts?offset={offset}&limit={limit}"
+        url = (
+            f"{_API_BASE}/blog/{hostname}/posts?offset={offset}&limit={limit}&npf=true"
+        )
+        ctx = {"blog": blog_name, "offset": offset}
 
         try:
-            data = await self._request_with_retry(url, blog_name, offset)
+            data = await self._request_with_retry(url, error_context=ctx)
         except ApiError:
             raise
         except Exception as exc:
             raise ApiError(
                 f"API request failed: {exc}",
-                context={"blog": blog_name, "offset": offset},
+                context=ctx,
             ) from exc
 
         posts = data.get("response", {}).get("posts")
@@ -244,10 +238,60 @@ class TumblrClient:
             raise ApiError(
                 "API response missing 'posts' key",
                 context={
-                    "blog": blog_name,
-                    "offset": offset,
+                    **ctx,
                     "keys": list(data.get("response", {}).keys()),
                 },
             )
 
         return posts  # type: ignore[no-any-return]
+
+    async def get_tagged_posts(
+        self,
+        tag: str,
+        before: int | None = None,
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        """Fetch posts from the global /tagged endpoint.
+
+        Args:
+            tag: The tag to search for (e.g. 'landscape').
+            before: Unix timestamp cursor — fetch posts before this time.
+            limit: Number of posts per request (max 20).
+
+        Returns:
+            List of post dicts from the API.
+
+        Raises:
+            ApiError: If the API request fails or response is malformed.
+        """
+        url = f"{_API_BASE}/tagged?tag={tag}&limit={limit}&npf=true"
+        if before is not None:
+            url += f"&before={before}"
+        ctx: dict[str, Any] = {"tag": tag, "before": before}
+
+        try:
+            data = await self._request_with_retry(url, error_context=ctx)
+        except ApiError:
+            raise
+        except Exception as exc:
+            raise ApiError(
+                f"API request failed: {exc}",
+                context=ctx,
+            ) from exc
+
+        # The /tagged endpoint returns response as an array directly,
+        # not nested under {"posts": [...]}.
+        response = data.get("response")
+        if isinstance(response, list):
+            return response
+
+        # Some API versions may still nest under "posts".
+        if isinstance(response, dict):
+            posts = response.get("posts")
+            if isinstance(posts, list):
+                return posts
+
+        raise ApiError(
+            "Unexpected /tagged response format",
+            context={**ctx, "response_type": type(response).__name__},
+        )

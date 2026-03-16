@@ -3,17 +3,19 @@
 from __future__ import annotations
 
 import logging
+import shutil
 from pathlib import Path
 from typing import Any
 
 import aiosqlite
 
-from tumblr_dl.models import BlogState
+from tumblr_dl.models import BlogState, PostMetadata
 
 logger = logging.getLogger(__name__)
 
-_SCHEMA_VERSION = 1
+_SCHEMA_VERSION = 2
 
+# Full schema for fresh databases (version 0 → 2).
 _SCHEMA_SQL = """\
 CREATE TABLE IF NOT EXISTS blog_state (
     blog_name        TEXT PRIMARY KEY,
@@ -25,28 +27,104 @@ CREATE TABLE IF NOT EXISTS blog_state (
 );
 
 CREATE TABLE IF NOT EXISTS downloads (
-    id            INTEGER PRIMARY KEY AUTOINCREMENT,
-    blog_name     TEXT NOT NULL,
-    post_id       INTEGER NOT NULL,
-    url           TEXT NOT NULL,
-    file_path     TEXT NOT NULL,
-    media_type    TEXT NOT NULL,
-    status        TEXT NOT NULL,
-    file_size     INTEGER,
-    downloaded_at TEXT NOT NULL DEFAULT (datetime('now')),
+    id                      INTEGER PRIMARY KEY AUTOINCREMENT,
+    blog_name               TEXT NOT NULL,
+    post_id                 INTEGER NOT NULL,
+    url                     TEXT NOT NULL,
+    file_path               TEXT NOT NULL,
+    media_type              TEXT NOT NULL,
+    status                  TEXT NOT NULL,
+    file_size               INTEGER,
+    post_url                TEXT,
+    post_timestamp          INTEGER,
+    original_post_timestamp INTEGER,
+    content_labels          TEXT,
+    downloaded_at           TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE(blog_name, url)
 );
 
 CREATE INDEX IF NOT EXISTS idx_downloads_blog_post
     ON downloads(blog_name, post_id);
+
+CREATE TABLE IF NOT EXISTS post_tags (
+    blog_name  TEXT NOT NULL,
+    post_id    INTEGER NOT NULL,
+    tag        TEXT NOT NULL,
+    PRIMARY KEY (blog_name, post_id, tag)
+);
+
+CREATE INDEX IF NOT EXISTS idx_post_tags_tag ON post_tags(tag);
+
+CREATE TABLE IF NOT EXISTS reblog_trail (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    blog_name        TEXT NOT NULL,
+    post_id          INTEGER NOT NULL,
+    position         INTEGER NOT NULL,
+    trail_blog_name  TEXT,
+    trail_post_id    INTEGER,
+    trail_timestamp  INTEGER,
+    is_root          INTEGER NOT NULL DEFAULT 0,
+    UNIQUE(blog_name, post_id, position)
+);
+
+CREATE INDEX IF NOT EXISTS idx_trail_blog ON reblog_trail(trail_blog_name);
+
+CREATE TABLE IF NOT EXISTS skipped_posts (
+    blog_name    TEXT NOT NULL,
+    post_id      INTEGER NOT NULL,
+    skip_reason  TEXT NOT NULL,
+    matched_tag  TEXT,
+    skipped_at   TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (blog_name, post_id)
+);
+"""
+
+# Migration from v1 → v2: add new columns and tables.
+_MIGRATE_V1_TO_V2_SQL = """\
+ALTER TABLE downloads ADD COLUMN post_url TEXT;
+ALTER TABLE downloads ADD COLUMN post_timestamp INTEGER;
+ALTER TABLE downloads ADD COLUMN original_post_timestamp INTEGER;
+ALTER TABLE downloads ADD COLUMN content_labels TEXT;
+
+CREATE TABLE IF NOT EXISTS post_tags (
+    blog_name  TEXT NOT NULL,
+    post_id    INTEGER NOT NULL,
+    tag        TEXT NOT NULL,
+    PRIMARY KEY (blog_name, post_id, tag)
+);
+
+CREATE INDEX IF NOT EXISTS idx_post_tags_tag ON post_tags(tag);
+
+CREATE TABLE IF NOT EXISTS reblog_trail (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    blog_name        TEXT NOT NULL,
+    post_id          INTEGER NOT NULL,
+    position         INTEGER NOT NULL,
+    trail_blog_name  TEXT,
+    trail_post_id    INTEGER,
+    trail_timestamp  INTEGER,
+    is_root          INTEGER NOT NULL DEFAULT 0,
+    UNIQUE(blog_name, post_id, position)
+);
+
+CREATE INDEX IF NOT EXISTS idx_trail_blog ON reblog_trail(trail_blog_name);
+
+CREATE TABLE IF NOT EXISTS skipped_posts (
+    blog_name    TEXT NOT NULL,
+    post_id      INTEGER NOT NULL,
+    skip_reason  TEXT NOT NULL,
+    matched_tag  TEXT,
+    skipped_at   TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (blog_name, post_id)
+);
 """
 
 
 class DownloadTracker:
     """Async SQLite tracker for blog state and download records.
 
-    Manages per-blog pagination cursors and per-file download
-    history for deduplication and incremental sync.
+    Manages per-blog pagination cursors, per-file download history,
+    post tags, reblog trails, and skipped-post records.
 
     Args:
         db_path: Path to the SQLite database file.
@@ -69,12 +147,41 @@ class DownloadTracker:
         row = await cur_version.fetchone()
         version = row[0] if row else 0
 
-        if version < _SCHEMA_VERSION:
+        if version == 0:
+            # Fresh database — create full v2 schema.
             await self._conn.executescript(_SCHEMA_SQL)
             await self._conn.execute(f"PRAGMA user_version={_SCHEMA_VERSION}")
             await self._conn.commit()
+        elif version < _SCHEMA_VERSION:
+            await self._migrate_v1_to_v2()
 
-        logger.debug("Opened tracker database: %s", self._db_path)
+        logger.debug(
+            "Opened tracker database: %s (schema v%d)", self._db_path, _SCHEMA_VERSION
+        )
+
+    async def _migrate_v1_to_v2(self) -> None:
+        """Migrate from schema v1 to v2.
+
+        Backs up the database file, then adds new columns and tables.
+        Existing download records are preserved with NULL for new columns.
+        """
+        conn = self._ensure_conn()
+
+        # Backup the old database before migrating.
+        backup_path = self._db_path.with_suffix(".db.v1.bak")
+        logger.info("Backing up database to %s before migration...", backup_path)
+        # Close temporarily to ensure a clean backup.
+        await conn.close()
+        shutil.copy2(self._db_path, backup_path)
+        self._conn = await aiosqlite.connect(self._db_path)
+        await self._conn.execute("PRAGMA journal_mode=WAL")
+        conn = self._conn
+
+        logger.info("Migrating database schema from v1 to v2...")
+        await conn.executescript(_MIGRATE_V1_TO_V2_SQL)
+        await conn.execute(f"PRAGMA user_version={_SCHEMA_VERSION}")
+        await conn.commit()
+        logger.info("Migration complete. Backup at %s", backup_path)
 
     async def close(self) -> None:
         """Close the database connection."""
@@ -190,6 +297,10 @@ class DownloadTracker:
         media_type: str,
         status: str,
         file_size: int | None = None,
+        post_url: str | None = None,
+        post_timestamp: int | None = None,
+        original_post_timestamp: int | None = None,
+        content_labels: str | None = None,
     ) -> None:
         """Record a download attempt.
 
@@ -204,14 +315,31 @@ class DownloadTracker:
             media_type: Media type (image, video, audio).
             status: Result status (success, failed).
             file_size: File size in bytes (if known).
+            post_url: Canonical Tumblr post URL.
+            post_timestamp: Unix timestamp of the post/reblog.
+            original_post_timestamp: Unix timestamp of the original post.
+            content_labels: Comma-separated content labels.
         """
         conn = self._ensure_conn()
         await conn.execute(
             "INSERT OR REPLACE INTO downloads "
             "(blog_name, post_id, url, file_path, media_type, "
-            "status, file_size, downloaded_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))",
-            (blog_name, post_id, url, file_path, media_type, status, file_size),
+            "status, file_size, post_url, post_timestamp, "
+            "original_post_timestamp, content_labels, downloaded_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))",
+            (
+                blog_name,
+                post_id,
+                url,
+                file_path,
+                media_type,
+                status,
+                file_size,
+                post_url,
+                post_timestamp,
+                original_post_timestamp,
+                content_labels,
+            ),
         )
         await conn.commit()
 
@@ -241,3 +369,67 @@ class DownloadTracker:
             }
             for row in rows
         ]
+
+    # --- Post metadata (tags + reblog trail) ---
+
+    async def record_post_metadata(self, metadata: PostMetadata) -> None:
+        """Store tags and reblog trail entries for a post.
+
+        Args:
+            metadata: Extracted post metadata to persist.
+        """
+        conn = self._ensure_conn()
+
+        # Insert tags (normalized to lowercase by the extractor).
+        for tag in metadata.tags:
+            await conn.execute(
+                "INSERT OR IGNORE INTO post_tags (blog_name, post_id, tag) "
+                "VALUES (?, ?, ?)",
+                (metadata.blog_name, metadata.post_id, tag),
+            )
+
+        # Insert reblog trail entries.
+        for entry in metadata.trail:
+            await conn.execute(
+                "INSERT OR IGNORE INTO reblog_trail "
+                "(blog_name, post_id, position, trail_blog_name, "
+                "trail_post_id, trail_timestamp, is_root) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    metadata.blog_name,
+                    metadata.post_id,
+                    entry.position,
+                    entry.blog_name,
+                    entry.post_id,
+                    entry.timestamp,
+                    1 if entry.is_root else 0,
+                ),
+            )
+
+        await conn.commit()
+
+    # --- Skipped posts ---
+
+    async def record_skipped_post(
+        self,
+        blog_name: str,
+        post_id: int,
+        skip_reason: str,
+        matched_tag: str | None = None,
+    ) -> None:
+        """Record that a post was skipped (e.g. tag exclusion).
+
+        Args:
+            blog_name: The Tumblr blog name.
+            post_id: The skipped post ID.
+            skip_reason: Why it was skipped (e.g. 'tag_exclusion').
+            matched_tag: The tag that triggered the exclusion.
+        """
+        conn = self._ensure_conn()
+        await conn.execute(
+            "INSERT OR REPLACE INTO skipped_posts "
+            "(blog_name, post_id, skip_reason, matched_tag, skipped_at) "
+            "VALUES (?, ?, ?, ?, datetime('now'))",
+            (blog_name, post_id, skip_reason, matched_tag),
+        )
+        await conn.commit()

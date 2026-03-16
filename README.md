@@ -5,6 +5,10 @@ A CLI tool for downloading media (images, videos, audio) from Tumblr blogs using
 ## Features
 
 - Downloads images, videos, and audio from any Tumblr blog
+- **Tag-based search** — search and download from any Tumblr tag (e.g. `--tag landscape`)
+- **Rich metadata capture** — stores post URLs, tags, reblog trails, content labels, and timestamps in SQLite
+- **Reblog trail tracking** — captures the full reblog chain from original poster to current reblogger
+- **Tag exclusion** — skip posts matching glob patterns (e.g. `--exclude-tags "gore*,explicit"`)
 - Extracts embedded images from text and answer posts
 - Extracts video URLs from embedded iframes and NPF data attributes
 - Fully async architecture for concurrent I/O
@@ -58,7 +62,7 @@ tumblr-dl <blog_name> <output_dir> [options]
 
 | Argument | Description |
 |----------|-------------|
-| `blog_name` | The Tumblr blog name (e.g. `example` for example.tumblr.com) |
+| `blog_name` | The Tumblr blog name (e.g. `example` for example.tumblr.com). Optional with `--tag`. |
 | `output_dir` | Directory to save downloaded media |
 
 ### Options
@@ -72,6 +76,8 @@ tumblr-dl <blog_name> <output_dir> [options]
 | `--no-db` | off | Disable SQLite tracking; use filesystem-only dedup |
 | `--full-scan` | off | Ignore stored cursor; scan the entire blog |
 | `--retry-failed` | off | Re-download previously failed items before main scan |
+| `--tag TAG` | off | Search Tumblr by tag instead of downloading a specific blog |
+| `--exclude-tags PATTERNS` | off | Comma-separated glob patterns to exclude (e.g. `nsfw,explicit*`) |
 | `--debug` | off | Enable debug logging |
 
 ### Examples
@@ -111,6 +117,24 @@ Retry previously failed downloads:
 
 ```bash
 tumblr-dl myblog ./downloads --retry-failed
+```
+
+Search by tag across all of Tumblr:
+
+```bash
+tumblr-dl --tag landscape ./downloads --max-posts 200
+```
+
+Download a blog but skip posts with certain tags:
+
+```bash
+tumblr-dl myblog ./downloads --exclude-tags "gore*,explicit,minors"
+```
+
+Combine tag search with tag exclusion:
+
+```bash
+tumblr-dl --tag photography ./downloads --exclude-tags "ai*,generated" --max-posts 500
 ```
 
 ### Exit Codes
@@ -153,6 +177,32 @@ re-fetching the entire blog via the API each time — only new posts are process
 The database also tracks individual file downloads (URL, status, file size), enabling
 `--retry-failed` to re-attempt only previously failed downloads. Use `--no-db` to
 disable tracking entirely, or `--full-scan` to ignore the stored cursor for one run.
+
+### Rich metadata in SQLite
+
+Beyond download tracking, the database captures post metadata for later querying:
+
+- **Post tags** — stored in `post_tags` table, normalized to lowercase
+- **Reblog trail** — full reblog chain in `reblog_trail` table (original poster through each reblogger)
+- **Timestamps** — both the reblog and original post timestamps
+- **Content labels** — Tumblr Community Labels (Mature, Sexual Themes, etc.)
+- **Post URLs** — canonical Tumblr URLs for each downloaded media item
+- **Skipped posts** — posts excluded by `--exclude-tags` with the reason and matched tag
+
+Example queries against the database:
+
+```sql
+-- Find original posters for content discovered on a blog
+SELECT DISTINCT trail_blog_name, COUNT(*) as posts
+FROM reblog_trail WHERE blog_name = 'someblog' AND is_root = 1
+GROUP BY trail_blog_name ORDER BY posts DESC;
+
+-- Find all posts with a specific tag
+SELECT DISTINCT blog_name, post_id FROM post_tags WHERE tag = 'landscape';
+
+-- See what was excluded and why
+SELECT * FROM skipped_posts WHERE blog_name = 'someblog';
+```
 
 ### Why not `httpx`?
 

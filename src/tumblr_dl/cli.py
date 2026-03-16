@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import fnmatch
 import logging
 import sys
 import time
@@ -21,7 +22,7 @@ from tumblr_dl.exceptions import (
     DownloadError,
     TumblrDlError,
 )
-from tumblr_dl.extractors import extract_media
+from tumblr_dl.extractors import extract_media, extract_post_metadata
 from tumblr_dl.models import DownloadStats, DownloadStatus, MediaItem, MediaType
 from tumblr_dl.tracker import DownloadTracker
 
@@ -39,11 +40,13 @@ def _build_parser() -> argparse.ArgumentParser:
     """Build the argument parser."""
     parser = argparse.ArgumentParser(
         prog="tumblr-dl",
-        description="Download media from a Tumblr blog.",
+        description="Download media from a Tumblr blog or tag search.",
     )
     parser.add_argument(
         "blog_name",
-        help="The Tumblr blog name (e.g. 'example')",
+        nargs="?",
+        default=None,
+        help="The Tumblr blog name (e.g. 'example'). Optional with --tag.",
     )
     parser.add_argument(
         "output_dir",
@@ -87,6 +90,16 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Re-download previously failed items before main scan",
     )
     parser.add_argument(
+        "--tag",
+        default=None,
+        help="Search Tumblr by tag instead of downloading a specific blog",
+    )
+    parser.add_argument(
+        "--exclude-tags",
+        default=None,
+        help="Comma-separated glob patterns to exclude (e.g. 'nsfw,explicit*')",
+    )
+    parser.add_argument(
         "--debug",
         action="store_true",
         help="Enable debug logging",
@@ -107,6 +120,32 @@ def _configure_logging(debug: bool) -> None:
     )
     pkg_logger = logging.getLogger("tumblr_dl")
     pkg_logger.setLevel(logging.DEBUG if debug else logging.INFO)
+
+
+def _parse_exclude_patterns(raw: str | None) -> list[str]:
+    """Parse comma-separated exclude tag patterns to lowercase list."""
+    if not raw:
+        return []
+    return [p.strip().lower() for p in raw.split(",") if p.strip()]
+
+
+def _matches_exclusion(tags: list[str], patterns: list[str]) -> str | None:
+    """Check if any tag matches any exclusion pattern.
+
+    Uses case-insensitive fnmatch glob matching.
+
+    Args:
+        tags: Lowercase tag list from the post.
+        patterns: Lowercase glob patterns from --exclude-tags.
+
+    Returns:
+        The first matching tag string, or None if no match.
+    """
+    for tag in tags:
+        for pattern in patterns:
+            if fnmatch.fnmatch(tag, pattern):
+                return tag
+    return None
 
 
 async def _retry_failed_downloads(
@@ -155,6 +194,7 @@ async def _download_blog(
     start_offset: int = 0,
     max_posts: int | None = None,
     full_scan: bool = False,
+    exclude_patterns: list[str] | None = None,
 ) -> DownloadStats:
     """Paginate through a blog and download all media.
 
@@ -167,6 +207,7 @@ async def _download_blog(
         start_offset: Post offset to begin at.
         max_posts: Stop after processing this many posts.
         full_scan: If True, ignore stored cursor.
+        exclude_patterns: Tag glob patterns to skip.
 
     Returns:
         Accumulated download statistics.
@@ -205,17 +246,11 @@ async def _download_blog(
             post_ts: int = post.get("timestamp", 0)
 
             # Early termination: post already seen on a previous run.
-            # The API returns posts newest-published-first.  We stop when
-            # we reach a post whose *timestamp* is at-or-before our last
-            # known timestamp AND whose ID is at-or-below our cursor.
-            # Checking both handles queued/scheduled posts whose IDs may
-            # not align with publish order.
             id_seen = highest_known_id and post_id <= highest_known_id
             ts_seen = last_known_ts == 0 or post_ts <= last_known_ts
             if id_seen and ts_seen:
                 logger.info(
-                    "Reached previously seen post %d "
-                    "(cursor: %d, ts: %d). Stopping.",
+                    "Reached previously seen post %d (cursor: %d, ts: %d). Stopping.",
                     post_id,
                     highest_known_id,
                     last_known_ts,
@@ -235,7 +270,29 @@ async def _download_blog(
                 post.get("type", "unknown"),
             )
 
-            for item in extract_media(post, blog_name):
+            # Extract post metadata (tags, trail, content labels).
+            metadata = extract_post_metadata(post, blog_name)
+
+            # Record metadata to DB.
+            if tracker:
+                await tracker.record_post_metadata(metadata)
+
+            # Tag exclusion check.
+            if exclude_patterns and metadata.tags:
+                matched = _matches_exclusion(metadata.tags, exclude_patterns)
+                if matched:
+                    logger.info(
+                        "Skipping post %d: tag '%s' matches exclusion pattern.",
+                        post_id,
+                        matched,
+                    )
+                    if tracker:
+                        await tracker.record_skipped_post(
+                            blog_name, post_id, "tag_exclusion", matched
+                        )
+                    continue
+
+            for item in extract_media(post, blog_name, metadata=metadata):
                 try:
                     status = await download_item(item, output_dir, dedup)
                 except DownloadError as exc:
@@ -268,22 +325,138 @@ async def _download_blog(
     return stats
 
 
+async def _download_tagged(
+    client: TumblrClient,
+    tag: str,
+    output_dir: Path,
+    dedup: DedupStrategy,
+    tracker: DownloadTracker | None = None,
+    max_posts: int | None = None,
+    exclude_patterns: list[str] | None = None,
+) -> DownloadStats:
+    """Search by tag across Tumblr and download matching media.
+
+    Uses the /tagged endpoint with timestamp-based cursor pagination.
+
+    Args:
+        client: Authenticated Tumblr API client.
+        tag: The tag to search for.
+        output_dir: Directory to save files into.
+        dedup: Duplicate detection strategy.
+        tracker: Optional SQLite tracker for metadata storage.
+        max_posts: Stop after processing this many posts.
+        exclude_patterns: Tag glob patterns to skip.
+
+    Returns:
+        Accumulated download statistics.
+    """
+    stats = DownloadStats()
+    before: int | None = None
+
+    while True:
+        posts = await client.get_tagged_posts(tag, before=before, limit=_BATCH_SIZE)
+        if not posts:
+            logger.info("No more tagged posts found.")
+            break
+
+        for post in posts:
+            post_id: int = post["id"]
+
+            # The blog name comes from each individual post.
+            post_blog = post.get("blog_name") or post.get("blog", {}).get(
+                "name", "unknown"
+            )
+
+            stats.posts_processed += 1
+            logger.info(
+                "Processing tagged post %d from %s (ID: %s, type: %s)...",
+                stats.posts_processed,
+                post_blog,
+                post_id,
+                post.get("type", "unknown"),
+            )
+
+            # Extract post metadata.
+            metadata = extract_post_metadata(post, post_blog)
+
+            if tracker:
+                await tracker.record_post_metadata(metadata)
+
+            # Tag exclusion check.
+            if exclude_patterns and metadata.tags:
+                matched = _matches_exclusion(metadata.tags, exclude_patterns)
+                if matched:
+                    logger.info(
+                        "Skipping post %d: tag '%s' matches exclusion pattern.",
+                        post_id,
+                        matched,
+                    )
+                    if tracker:
+                        await tracker.record_skipped_post(
+                            post_blog, post_id, "tag_exclusion", matched
+                        )
+                    continue
+
+            for item in extract_media(post, post_blog, metadata=metadata):
+                try:
+                    status = await download_item(item, output_dir, dedup)
+                except DownloadError as exc:
+                    logger.warning("%s", exc)
+                    status = DownloadStatus.FAILED
+                stats.record(item.media_type, status)
+
+            if max_posts and stats.posts_processed >= max_posts:
+                logger.info(
+                    "Reached maximum posts (%d). Stopping.",
+                    max_posts,
+                )
+                break
+
+        if max_posts and stats.posts_processed >= max_posts:
+            break
+
+        # Advance cursor: use the timestamp of the last post in the batch.
+        last_ts = posts[-1].get("timestamp", 0)
+        if last_ts and last_ts != before:
+            before = last_ts
+        else:
+            # No progress — avoid infinite loop.
+            logger.info("Pagination cursor did not advance. Stopping.")
+            break
+
+    return stats
+
+
 async def _run(args: argparse.Namespace) -> int:
     """Execute the download workflow. Returns exit code."""
     _configure_logging(args.debug)
 
+    # Validate arguments.
+    if not args.tag and not args.blog_name:
+        logger.error("blog_name is required unless --tag is specified.")
+        return _EXIT_CONFIG
+
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    exclude_patterns = _parse_exclude_patterns(args.exclude_tags)
 
     start_time = time.monotonic()
 
     try:
         async with TumblrClient(args.config) as client:
-            logger.info(
-                "Starting download from %s to %s",
-                args.blog_name,
-                output_dir,
-            )
+            if args.tag:
+                logger.info(
+                    "Starting tag search for '%s' to %s",
+                    args.tag,
+                    output_dir,
+                )
+            else:
+                logger.info(
+                    "Starting download from %s to %s",
+                    args.blog_name,
+                    output_dir,
+                )
 
             # Set up tracker and dedup strategy.
             if args.no_db:
@@ -300,32 +473,46 @@ async def _run(args: argparse.Namespace) -> int:
             try:
                 stats = DownloadStats()
 
-                # Retry previously failed downloads if requested.
-                if args.retry_failed and tracker:
-                    await _retry_failed_downloads(
-                        tracker, args.blog_name, output_dir, dedup, stats
+                if args.tag:
+                    # Tag search mode.
+                    stats = await _download_tagged(
+                        client=client,
+                        tag=args.tag,
+                        output_dir=output_dir,
+                        dedup=dedup,
+                        tracker=tracker,
+                        max_posts=args.max_posts,
+                        exclude_patterns=exclude_patterns,
+                    )
+                else:
+                    # Blog download mode.
+                    # Retry previously failed downloads if requested.
+                    if args.retry_failed and tracker:
+                        await _retry_failed_downloads(
+                            tracker, args.blog_name, output_dir, dedup, stats
+                        )
+
+                    # Main download loop.
+                    main_stats = await _download_blog(
+                        client=client,
+                        blog_name=args.blog_name,
+                        output_dir=output_dir,
+                        dedup=dedup,
+                        tracker=tracker,
+                        start_offset=args.start_post,
+                        max_posts=args.max_posts,
+                        full_scan=args.full_scan,
+                        exclude_patterns=exclude_patterns,
                     )
 
-                # Main download loop.
-                main_stats = await _download_blog(
-                    client=client,
-                    blog_name=args.blog_name,
-                    output_dir=output_dir,
-                    dedup=dedup,
-                    tracker=tracker,
-                    start_offset=args.start_post,
-                    max_posts=args.max_posts,
-                    full_scan=args.full_scan,
-                )
+                    # Merge stats from retry pass into main stats.
+                    for mt in MediaType:
+                        main_stats.found[mt] += stats.found[mt]
+                        main_stats.downloaded[mt] += stats.downloaded[mt]
+                        main_stats.skipped[mt] += stats.skipped[mt]
+                        main_stats.failed[mt] += stats.failed[mt]
 
-                # Merge stats from retry pass into main stats.
-                for mt in MediaType:
-                    main_stats.found[mt] += stats.found[mt]
-                    main_stats.downloaded[mt] += stats.downloaded[mt]
-                    main_stats.skipped[mt] += stats.skipped[mt]
-                    main_stats.failed[mt] += stats.failed[mt]
-
-                stats = main_stats
+                    stats = main_stats
             finally:
                 if tracker:
                     await tracker.close()

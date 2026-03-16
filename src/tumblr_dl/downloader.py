@@ -105,6 +105,11 @@ class SqliteDedup(DedupStrategy):
         file_size: int | None = None
         if status is DownloadStatus.SUCCESS and dest.exists():
             file_size = dest.stat().st_size
+
+        content_labels_str: str | None = None
+        if item.content_labels:
+            content_labels_str = ",".join(item.content_labels)
+
         await tracker.record_download(
             blog_name=item.blog_name,
             post_id=item.post_id,
@@ -113,6 +118,10 @@ class SqliteDedup(DedupStrategy):
             media_type=item.media_type.value,
             status=status.value,
             file_size=file_size,
+            post_url=item.post_url or None,
+            post_timestamp=item.post_timestamp or None,
+            original_post_timestamp=item.original_post_timestamp,
+            content_labels=content_labels_str,
         )
 
 

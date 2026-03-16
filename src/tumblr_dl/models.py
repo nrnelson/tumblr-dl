@@ -27,6 +27,35 @@ def _zero_counts() -> dict[MediaType, int]:
 
 
 @dataclass
+class TrailEntry:
+    """A single entry in a reblog trail."""
+
+    position: int
+    blog_name: str | None
+    post_id: int | None
+    timestamp: int | None
+    is_root: bool
+
+
+@dataclass
+class PostMetadata:
+    """Per-post metadata extracted from the API response.
+
+    Captures tags, reblog trail, content labels, and timestamps
+    that apply to the post as a whole (not per-media-item).
+    """
+
+    blog_name: str
+    post_id: int
+    post_url: str
+    post_timestamp: int
+    tags: list[str] = field(default_factory=list)
+    trail: list[TrailEntry] = field(default_factory=list)
+    content_labels: list[str] = field(default_factory=list)
+    original_post_timestamp: int | None = None
+
+
+@dataclass
 class MediaItem:
     """A single media URL extracted from a post."""
 
@@ -35,6 +64,9 @@ class MediaItem:
     post_id: int
     blog_name: str
     post_timestamp: int = 0
+    post_url: str = ""
+    original_post_timestamp: int | None = None
+    content_labels: list[str] = field(default_factory=list)
 
 
 @dataclass
