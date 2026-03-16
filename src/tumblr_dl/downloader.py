@@ -1,8 +1,10 @@
-"""File download logic with pluggable deduplication."""
+"""Async file download logic with pluggable deduplication."""
 
 from __future__ import annotations
 
 import abc
+import asyncio
+import functools
 import logging
 from pathlib import Path
 from urllib.parse import urlparse
@@ -66,7 +68,22 @@ def _resolve_path(item: MediaItem, output_dir: Path) -> Path:
     return output_dir / safe_name
 
 
-def download_item(
+def _sync_download(url: str, dest: Path, blog_name: str) -> None:
+    """Download a file synchronously (run in thread pool)."""
+    headers = {
+        "User-Agent": _USER_AGENT,
+        "Referer": f"https://{blog_name}.tumblr.com/",
+    }
+    response = requests.get(url, stream=True, headers=headers, timeout=30)
+    response.raise_for_status()
+
+    with dest.open("wb") as fh:
+        for chunk in response.iter_content(chunk_size=8192):
+            if chunk:
+                fh.write(chunk)
+
+
+async def download_item(
     item: MediaItem,
     output_dir: Path,
     dedup: DedupStrategy,
@@ -93,22 +110,9 @@ def download_item(
     logger.info("Downloading: %s -> %s", item.url, dest.name)
 
     try:
-        headers = {
-            "User-Agent": _USER_AGENT,
-            "Referer": (f"https://{item.blog_name}.tumblr.com/"),
-        }
-        response = requests.get(
-            item.url,
-            stream=True,
-            headers=headers,
-            timeout=30,
+        await asyncio.to_thread(
+            functools.partial(_sync_download, item.url, dest, item.blog_name)
         )
-        response.raise_for_status()
-
-        with dest.open("wb") as fh:
-            for chunk in response.iter_content(chunk_size=8192):
-                if chunk:
-                    fh.write(chunk)
 
         dedup.record(item, dest, DownloadStatus.SUCCESS)
         return DownloadStatus.SUCCESS

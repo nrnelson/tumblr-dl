@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import logging
 import sys
-import time
 from pathlib import Path
 
 from tumblr_dl.client import TumblrClient
@@ -25,7 +25,7 @@ from tumblr_dl.models import DownloadStats, DownloadStatus
 logger = logging.getLogger(__name__)
 
 _BATCH_SIZE = 20
-_BATCH_DELAY_SECONDS = 1
+_BATCH_DELAY_SECONDS = 1.0
 
 # Exit codes
 _EXIT_OK = 0
@@ -50,7 +50,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--config",
         default="~/.tumblr",
-        help=("Path to YAML OAuth config file (default: ~/.tumblr)"),
+        help="Path to YAML OAuth config file (default: ~/.tumblr)",
     )
     parser.add_argument(
         "--start-post",
@@ -76,7 +76,7 @@ def _configure_logging(debug: bool) -> None:
     """Configure logging level and format.
 
     Only our package gets DEBUG output. Third-party loggers
-    (urllib3, oauthlib, pytumblr) stay at WARNING to prevent
+    (urllib3, oauthlib, requests) stay at WARNING to prevent
     leaking credentials or auth headers.
     """
     logging.basicConfig(
@@ -87,7 +87,7 @@ def _configure_logging(debug: bool) -> None:
     pkg_logger.setLevel(logging.DEBUG if debug else logging.INFO)
 
 
-def _download_blog(
+async def _download_blog(
     client: TumblrClient,
     blog_name: str,
     output_dir: Path,
@@ -115,7 +115,7 @@ def _download_blog(
     offset = start_offset
 
     while True:
-        posts = client.get_posts(blog_name, offset=offset, limit=_BATCH_SIZE)
+        posts = await client.get_posts(blog_name, offset=offset, limit=_BATCH_SIZE)
         if not posts:
             logger.info("No more posts found.")
             break
@@ -131,7 +131,7 @@ def _download_blog(
 
             for item in extract_media(post, blog_name):
                 try:
-                    status = download_item(item, output_dir, dedup)
+                    status = await download_item(item, output_dir, dedup)
                 except DownloadError as exc:
                     logger.warning("%s", exc)
                     status = DownloadStatus.FAILED
@@ -145,12 +145,12 @@ def _download_blog(
                 return stats
 
         offset += _BATCH_SIZE
-        time.sleep(_BATCH_DELAY_SECONDS)
+        await asyncio.sleep(_BATCH_DELAY_SECONDS)
 
     return stats
 
 
-def _run(args: argparse.Namespace) -> int:
+async def _run(args: argparse.Namespace) -> int:
     """Execute the download workflow. Returns exit code."""
     _configure_logging(args.debug)
 
@@ -158,26 +158,25 @@ def _run(args: argparse.Namespace) -> int:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     try:
-        client = TumblrClient(args.config)
+        async with TumblrClient(args.config) as client:
+            logger.info(
+                "Starting download from %s to %s",
+                args.blog_name,
+                output_dir,
+            )
+
+            stats = await _download_blog(
+                client=client,
+                blog_name=args.blog_name,
+                output_dir=output_dir,
+                dedup=FilesystemDedup(),
+                start_offset=args.start_post,
+                max_posts=args.max_posts,
+            )
+
     except ConfigError as exc:
         logger.error("%s", exc)
         return _EXIT_CONFIG
-
-    logger.info(
-        "Starting download from %s to %s",
-        args.blog_name,
-        output_dir,
-    )
-
-    try:
-        stats = _download_blog(
-            client=client,
-            blog_name=args.blog_name,
-            output_dir=output_dir,
-            dedup=FilesystemDedup(),
-            start_offset=args.start_post,
-            max_posts=args.max_posts,
-        )
     except TumblrDlError as exc:
         logger.error("API error: %s", exc)
         return _EXIT_RUNTIME
@@ -190,7 +189,7 @@ def main() -> None:
     """CLI entry point."""
     parser = _build_parser()
     args = parser.parse_args()
-    sys.exit(_run(args))
+    sys.exit(asyncio.run(_run(args)))
 
 
 if __name__ == "__main__":

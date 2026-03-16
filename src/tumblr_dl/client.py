@@ -1,14 +1,19 @@
-"""Tumblr API client wrapper with config loading."""
+"""Async Tumblr API client with OAuth1 authentication."""
 
 from __future__ import annotations
 
+import asyncio
+import functools
 from pathlib import Path
 from typing import Any
 
-import pytumblr  # type: ignore[import-untyped]
+import requests
 import yaml
+from requests_oauthlib import OAuth1  # type: ignore[import-untyped]
 
 from tumblr_dl.exceptions import ApiError, ConfigError
+
+_API_BASE = "https://api.tumblr.com/v2"
 
 _REQUIRED_KEYS = (
     "consumer_key",
@@ -54,23 +59,62 @@ def load_config(config_path: str | Path) -> dict[str, str]:
     return {k: data[k] for k in _REQUIRED_KEYS}
 
 
+def _normalize_blog_name(blog_name: str) -> str:
+    """Ensure blog name is a full hostname.
+
+    Args:
+        blog_name: Either 'example' or 'example.tumblr.com'.
+
+    Returns:
+        Full hostname like 'example.tumblr.com'.
+    """
+    if "." not in blog_name:
+        return f"{blog_name}.tumblr.com"
+    return blog_name
+
+
 class TumblrClient:
-    """Thin wrapper around pytumblr for fetching blog posts.
+    """Async Tumblr API v2 client with OAuth1 authentication.
+
+    Uses requests + requests-oauthlib under the hood (run in a
+    thread pool) for TLS compatibility with Tumblr's CDN.
 
     Args:
         config_path: Path to YAML OAuth credentials file.
+
+    Usage::
+
+        async with TumblrClient("~/.tumblr") as client:
+            posts = await client.get_posts("blogname")
     """
 
     def __init__(self, config_path: str | Path) -> None:
         creds = load_config(config_path)
-        self._client = pytumblr.TumblrRestClient(
+        self._auth = OAuth1(
             creds["consumer_key"],
-            creds["consumer_secret"],
-            creds["oauth_token"],
-            creds["oauth_token_secret"],
+            client_secret=creds["consumer_secret"],
+            resource_owner_key=creds["oauth_token"],
+            resource_owner_secret=creds["oauth_token_secret"],
         )
+        self._session = requests.Session()
+        self._session.auth = self._auth
 
-    def get_posts(
+    async def __aenter__(self) -> TumblrClient:
+        return self
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: object,
+    ) -> None:
+        self.close()
+
+    def close(self) -> None:
+        """Close the underlying HTTP session."""
+        self._session.close()
+
+    async def get_posts(
         self,
         blog_name: str,
         offset: int = 0,
@@ -87,28 +131,47 @@ class TumblrClient:
             List of post dicts from the API.
 
         Raises:
-            ApiError: If the API response is missing expected data.
+            ApiError: If the API request fails or response is malformed.
         """
-        response = self._client.posts(blog_name, offset=offset, limit=limit)
+        hostname = _normalize_blog_name(blog_name)
+        url = f"{_API_BASE}/blog/{hostname}/posts"
 
-        if not isinstance(response, dict):
+        try:
+            response = await asyncio.to_thread(
+                functools.partial(
+                    self._session.get,
+                    url,
+                    params={"offset": offset, "limit": limit},
+                    timeout=30,
+                )
+            )
+            response.raise_for_status()
+        except requests.HTTPError as exc:
+            status = exc.response.status_code if exc.response is not None else None
             raise ApiError(
-                "Unexpected API response type",
+                f"API returned {status}",
                 context={
                     "blog": blog_name,
                     "offset": offset,
-                    "type": str(type(response)),
+                    "status_code": status,
                 },
-            )
+            ) from exc
+        except requests.RequestException as exc:
+            raise ApiError(
+                f"API request failed: {exc}",
+                context={"blog": blog_name, "offset": offset},
+            ) from exc
 
-        if "posts" not in response:
+        data = response.json()
+        posts = data.get("response", {}).get("posts")
+        if posts is None:
             raise ApiError(
                 "API response missing 'posts' key",
                 context={
                     "blog": blog_name,
                     "offset": offset,
-                    "keys": list(response.keys()),
+                    "keys": list(data.get("response", {}).keys()),
                 },
             )
 
-        return response["posts"]  # type: ignore[no-any-return]
+        return posts  # type: ignore[no-any-return]

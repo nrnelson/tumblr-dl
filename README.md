@@ -6,7 +6,8 @@ A CLI tool for downloading media (images, videos, audio) from Tumblr blogs using
 
 - Downloads images, videos, and audio from any Tumblr blog
 - Extracts embedded images from text and answer posts
-- Extracts video URLs from embedded iframes
+- Extracts video URLs from embedded iframes and NPF data attributes
+- Fully async architecture for concurrent I/O
 - Skips already-downloaded files (duplicate detection)
 - Resumable — start from any post offset
 - Paginates automatically through all blog posts
@@ -100,10 +101,33 @@ tumblr-dl myblog ./downloads --start-post 200 --config ~/my-creds.yaml
 | Post Type | What Gets Downloaded |
 |-----------|---------------------|
 | Photo | Original-size images from photo posts |
-| Video | Direct video URLs and embedded iframe sources |
+| Video | Direct video URLs, embedded iframes, and NPF video attributes |
 | Audio | Direct audio URLs |
-| Text | Embedded `<img>` tags in post body |
-| Answer | Embedded `<img>` tags in answer body |
+| Text | Embedded `<img>` tags and NPF video figures in post body |
+| Answer | Embedded `<img>` tags and NPF video figures in answer body |
+
+## Architecture
+
+### Async with `requests` via thread pool
+
+This project uses an async (`asyncio`) architecture, but delegates HTTP calls to
+`requests`/`requests-oauthlib` running in thread pools via `asyncio.to_thread()`.
+
+This is intentional: Tumblr's API and CDN employ TLS fingerprinting that rejects
+connections from pure-Python HTTP clients like `httpx` and `aiohttp` (both return
+HTTP 403 from Tumblr's nginx layer regardless of valid OAuth credentials). The
+`requests` library uses `urllib3`, whose TLS stack is accepted by Tumblr.
+
+The async wrapper still provides:
+- Non-blocking pagination delays (`asyncio.sleep`)
+- Foundation for concurrent downloads in future versions
+- Clean async context manager lifecycle for the API client
+
+### Why not `pytumblr`?
+
+The official `pytumblr` library was replaced with a direct Tumblr API v2 client
+because pytumblr is synchronous-only, and we only need the `GET /posts` endpoint.
+Our client is ~170 lines vs pytumblr's ~770, with full type safety and async support.
 
 ## Development
 
@@ -134,9 +158,9 @@ pytest tests/ --cov --cov-report=term-missing
 ```
 src/tumblr_dl/
 ├── __init__.py        — package + version
-├── cli.py             — argparse + main() entry point
-├── client.py          — TumblrClient wrapper (config loading + API)
-├── downloader.py      — download_item() with DedupStrategy ABC
+├── cli.py             — async argparse + main() entry point
+├── client.py          — async TumblrClient (OAuth1 + Tumblr API v2)
+├── downloader.py      — async download_item() with DedupStrategy ABC
 ├── exceptions.py      — TumblrDlError hierarchy
 ├── extractors.py      — media URL extraction per post type
 ├── models.py          — enums (DownloadStatus, MediaType) + dataclasses
