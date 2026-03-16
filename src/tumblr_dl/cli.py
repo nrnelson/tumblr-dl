@@ -25,7 +25,6 @@ from tumblr_dl.models import DownloadStats, DownloadStatus
 logger = logging.getLogger(__name__)
 
 _BATCH_SIZE = 20
-_BATCH_DELAY_SECONDS = 1.0
 
 # Exit codes
 _EXIT_OK = 0
@@ -145,7 +144,6 @@ async def _download_blog(
                 return stats
 
         offset += _BATCH_SIZE
-        await asyncio.sleep(_BATCH_DELAY_SECONDS)
 
     return stats
 

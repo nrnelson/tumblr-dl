@@ -11,6 +11,7 @@ import yaml
 
 from tumblr_dl.client import TumblrClient, _normalize_blog_name, load_config
 from tumblr_dl.exceptions import ApiError, ConfigError
+from tumblr_dl.ratelimit import AsyncRateLimiter
 
 # --- load_config tests ---
 
@@ -82,7 +83,7 @@ def test_normalize_custom_domain() -> None:
     assert _normalize_blog_name("blog.example.com") == "blog.example.com"
 
 
-# --- TumblrClient tests ---
+# --- TumblrClient helpers ---
 
 
 def _make_config_file(tmp_path: Path) -> Path:
@@ -109,32 +110,37 @@ def _make_mock_response(json_data: dict[str, Any], status_code: int = 200) -> Ma
     return resp
 
 
-@pytest.mark.asyncio
-async def test_get_posts_returns_post_list(tmp_path: Path) -> None:
-    """Successful API call returns the posts list."""
-    _make_config_file(tmp_path)
-    posts = [{"id": 1, "type": "photo"}, {"id": 2, "type": "text"}]
-    mock_resp = _make_mock_response({"response": {"posts": posts}})
-
+def _stub_client() -> TumblrClient:
+    """Create a TumblrClient with mocked internals (no real config)."""
     with patch.object(TumblrClient, "__init__", lambda self, *a, **kw: None):
         client = TumblrClient.__new__(TumblrClient)
         client._oauth = MagicMock()
-        client._oauth.sign.return_value = (
-            "https://signed.url",
-            {"Authorization": "OAuth ..."},
-            "",
-        )
+        client._oauth.sign.return_value = ("https://signed.url", {}, "")
         client._session = AsyncMock()
-        client._session.get = AsyncMock(return_value=mock_resp)
+        client._limiter = AsyncRateLimiter(max_calls=1000, period=60.0)
+        return client
 
-        result = await client.get_posts("testblog", offset=0, limit=20)
+
+# --- TumblrClient.get_posts tests ---
+
+
+@pytest.mark.asyncio
+async def test_get_posts_returns_post_list() -> None:
+    """Successful API call returns the posts list."""
+    posts = [{"id": 1, "type": "photo"}, {"id": 2, "type": "text"}]
+    mock_resp = _make_mock_response({"response": {"posts": posts}})
+
+    client = _stub_client()
+    client._session.get = AsyncMock(return_value=mock_resp)
+
+    result = await client.get_posts("testblog", offset=0, limit=20)
 
     assert result == posts
     assert len(result) == 2
 
 
 @pytest.mark.asyncio
-async def test_get_posts_api_error_with_status(tmp_path: Path) -> None:
+async def test_get_posts_api_error_with_status() -> None:
     """HTTP error from API raises ApiError with status code context."""
     mock_resp = MagicMock()
     mock_resp.status_code = 401
@@ -142,50 +148,38 @@ async def test_get_posts_api_error_with_status(tmp_path: Path) -> None:
     error.response = mock_resp  # type: ignore[attr-defined]
     mock_resp.raise_for_status.side_effect = error
 
-    with patch.object(TumblrClient, "__init__", lambda self, *a, **kw: None):
-        client = TumblrClient.__new__(TumblrClient)
-        client._oauth = MagicMock()
-        client._oauth.sign.return_value = ("https://signed.url", {}, "")
-        client._session = AsyncMock()
-        client._session.get = AsyncMock(return_value=mock_resp)
+    client = _stub_client()
+    client._session.get = AsyncMock(return_value=mock_resp)
 
-        with pytest.raises(ApiError, match="API returned 401") as exc_info:
-            await client.get_posts("testblog")
+    with pytest.raises(ApiError, match="API returned 401") as exc_info:
+        await client.get_posts("testblog")
 
     assert exc_info.value.context["status_code"] == 401
     assert exc_info.value.context["blog"] == "testblog"
 
 
 @pytest.mark.asyncio
-async def test_get_posts_network_error(tmp_path: Path) -> None:
+async def test_get_posts_network_error() -> None:
     """Network-level failure raises ApiError with blog context."""
-    with patch.object(TumblrClient, "__init__", lambda self, *a, **kw: None):
-        client = TumblrClient.__new__(TumblrClient)
-        client._oauth = MagicMock()
-        client._oauth.sign.return_value = ("https://signed.url", {}, "")
-        client._session = AsyncMock()
-        client._session.get = AsyncMock(side_effect=ConnectionError("timeout"))
+    client = _stub_client()
+    client._session.get = AsyncMock(side_effect=ConnectionError("timeout"))
 
-        with pytest.raises(ApiError, match="API request failed") as exc_info:
-            await client.get_posts("testblog")
+    with pytest.raises(ApiError, match="API request failed") as exc_info:
+        await client.get_posts("testblog")
 
     assert exc_info.value.context["blog"] == "testblog"
 
 
 @pytest.mark.asyncio
-async def test_get_posts_missing_posts_key(tmp_path: Path) -> None:
+async def test_get_posts_missing_posts_key() -> None:
     """Response without 'posts' key raises ApiError."""
     mock_resp = _make_mock_response({"response": {"blog": {}}})
 
-    with patch.object(TumblrClient, "__init__", lambda self, *a, **kw: None):
-        client = TumblrClient.__new__(TumblrClient)
-        client._oauth = MagicMock()
-        client._oauth.sign.return_value = ("https://signed.url", {}, "")
-        client._session = AsyncMock()
-        client._session.get = AsyncMock(return_value=mock_resp)
+    client = _stub_client()
+    client._session.get = AsyncMock(return_value=mock_resp)
 
-        with pytest.raises(ApiError, match="missing 'posts' key"):
-            await client.get_posts("testblog")
+    with pytest.raises(ApiError, match="missing 'posts' key"):
+        await client.get_posts("testblog")
 
 
 @pytest.mark.asyncio
@@ -201,3 +195,63 @@ async def test_client_context_manager(tmp_path: Path) -> None:
             assert client is not None
 
         mock_session.close.assert_called_once()
+
+
+# --- 429 retry tests ---
+
+
+@pytest.mark.asyncio
+async def test_retry_on_429_then_success() -> None:
+    """429 response triggers retry; succeeds on next attempt."""
+    posts = [{"id": 1, "type": "photo"}]
+    resp_429 = _make_mock_response({}, status_code=429)
+    resp_200 = _make_mock_response({"response": {"posts": posts}})
+
+    client = _stub_client()
+    client._session.get = AsyncMock(side_effect=[resp_429, resp_200])
+
+    with patch("tumblr_dl.client.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+        result = await client.get_posts("testblog")
+
+    assert result == posts
+    mock_sleep.assert_awaited_once()
+    # First retry delay should be 30s (base delay).
+    assert mock_sleep.call_args[0][0] == 30.0
+
+
+@pytest.mark.asyncio
+async def test_retry_exhausted_raises_api_error() -> None:
+    """All 429 retries exhausted raises ApiError."""
+    resp_429 = _make_mock_response({}, status_code=429)
+
+    client = _stub_client()
+    client._session.get = AsyncMock(return_value=resp_429)
+
+    with (
+        patch("tumblr_dl.client.asyncio.sleep", new_callable=AsyncMock),
+        pytest.raises(ApiError, match="429") as exc_info,
+    ):
+        await client.get_posts("testblog")
+
+    assert exc_info.value.context["status_code"] == 429
+
+
+@pytest.mark.asyncio
+async def test_retry_backoff_is_exponential() -> None:
+    """429 retries use exponential backoff delays."""
+    resp_429 = _make_mock_response({}, status_code=429)
+    posts = [{"id": 1}]
+    resp_200 = _make_mock_response({"response": {"posts": posts}})
+
+    # Fail 3 times, succeed on 4th.
+    client = _stub_client()
+    client._session.get = AsyncMock(
+        side_effect=[resp_429, resp_429, resp_429, resp_200]
+    )
+
+    with patch("tumblr_dl.client.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+        result = await client.get_posts("testblog")
+
+    assert result == posts
+    delays = [call[0][0] for call in mock_sleep.call_args_list]
+    assert delays == [30.0, 60.0, 120.0]

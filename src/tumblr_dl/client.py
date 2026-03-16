@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -10,6 +12,9 @@ from curl_cffi.requests import AsyncSession
 from oauthlib.oauth1 import Client as OAuth1Client
 
 from tumblr_dl.exceptions import ApiError, ConfigError
+from tumblr_dl.ratelimit import AsyncRateLimiter
+
+logger = logging.getLogger(__name__)
 
 _API_BASE = "https://api.tumblr.com/v2"
 
@@ -19,6 +24,11 @@ _REQUIRED_KEYS = (
     "oauth_token",
     "oauth_token_secret",
 )
+
+# 429 retry: exponential backoff starting at 30s, max 5 min, 4 attempts.
+_RETRY_MAX_ATTEMPTS = 4
+_RETRY_BASE_DELAY = 30.0
+_RETRY_MAX_DELAY = 300.0
 
 
 def load_config(config_path: str | Path) -> dict[str, str]:
@@ -75,10 +85,12 @@ class TumblrClient:
     """Async Tumblr API v2 client with OAuth1 authentication.
 
     Uses curl_cffi for native async HTTP with TLS compatibility,
-    and oauthlib for OAuth1 request signing.
+    and oauthlib for OAuth1 request signing. Includes a built-in
+    rate limiter (300 calls/min) and 429 backoff/retry.
 
     Args:
         config_path: Path to YAML OAuth credentials file.
+        rate_limit: Maximum API calls per minute (default: 300).
 
     Usage::
 
@@ -86,7 +98,11 @@ class TumblrClient:
             posts = await client.get_posts("blogname")
     """
 
-    def __init__(self, config_path: str | Path) -> None:
+    def __init__(
+        self,
+        config_path: str | Path,
+        rate_limit: int = 300,
+    ) -> None:
         creds = load_config(config_path)
         self._oauth = OAuth1Client(
             creds["consumer_key"],
@@ -95,6 +111,7 @@ class TumblrClient:
             resource_owner_secret=creds["oauth_token_secret"],
         )
         self._session: AsyncSession = AsyncSession()  # type: ignore[type-arg]
+        self._limiter = AsyncRateLimiter(max_calls=rate_limit, period=60.0)
 
     async def __aenter__(self) -> TumblrClient:
         return self
@@ -115,6 +132,77 @@ class TumblrClient:
         """Sign a URL with OAuth1 and return (signed_url, headers)."""
         uri, headers, _ = self._oauth.sign(url, http_method="GET")
         return uri, dict(headers)
+
+    async def _request_with_retry(
+        self,
+        url: str,
+        blog_name: str,
+        offset: int,
+    ) -> Any:
+        """Make a rate-limited API request with 429 backoff/retry.
+
+        Args:
+            url: The full API URL (with query params).
+            blog_name: Blog name for error context.
+            offset: Pagination offset for error context.
+
+        Returns:
+            The parsed JSON response.
+
+        Raises:
+            ApiError: After all retries are exhausted or on non-429 errors.
+        """
+        last_exc: Exception | None = None
+
+        for attempt in range(_RETRY_MAX_ATTEMPTS):
+            await self._limiter.acquire()
+
+            signed_url, headers = self._sign_url(url)
+            response = await self._session.get(
+                signed_url,
+                headers=headers,
+                timeout=30,
+            )
+
+            if response.status_code == 429:
+                delay = min(
+                    _RETRY_BASE_DELAY * (2**attempt),
+                    _RETRY_MAX_DELAY,
+                )
+                logger.warning(
+                    "Rate limited (429). Retrying in %.0fs (attempt %d/%d).",
+                    delay,
+                    attempt + 1,
+                    _RETRY_MAX_ATTEMPTS,
+                )
+                last_exc = ApiError(
+                    "API returned 429",
+                    context={
+                        "blog": blog_name,
+                        "offset": offset,
+                        "status_code": 429,
+                    },
+                )
+                await asyncio.sleep(delay)
+                continue
+
+            try:
+                response.raise_for_status()
+            except Exception as exc:
+                status = getattr(getattr(exc, "response", None), "status_code", None)
+                raise ApiError(
+                    f"API returned {status or response.status_code}",
+                    context={
+                        "blog": blog_name,
+                        "offset": offset,
+                        "status_code": status or response.status_code,
+                    },
+                ) from exc
+
+            return response.json()
+
+        # All retries exhausted on 429.
+        raise last_exc  # type: ignore[misc]
 
     async def get_posts(
         self,
@@ -139,30 +227,15 @@ class TumblrClient:
         url = f"{_API_BASE}/blog/{hostname}/posts?offset={offset}&limit={limit}"
 
         try:
-            signed_url, headers = self._sign_url(url)
-            response = await self._session.get(
-                signed_url,
-                headers=headers,
-                timeout=30,
-            )
-            response.raise_for_status()
+            data = await self._request_with_retry(url, blog_name, offset)
+        except ApiError:
+            raise
         except Exception as exc:
-            status = getattr(getattr(exc, "response", None), "status_code", None)
-            if status is not None:
-                raise ApiError(
-                    f"API returned {status}",
-                    context={
-                        "blog": blog_name,
-                        "offset": offset,
-                        "status_code": status,
-                    },
-                ) from exc
             raise ApiError(
                 f"API request failed: {exc}",
                 context={"blog": blog_name, "offset": offset},
             ) from exc
 
-        data = response.json()
         posts = data.get("response", {}).get("posts")
         if posts is None:
             raise ApiError(
