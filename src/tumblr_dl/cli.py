@@ -6,6 +6,7 @@ import argparse
 import asyncio
 import logging
 import sys
+import time
 from pathlib import Path
 
 from tumblr_dl.client import TumblrClient
@@ -155,6 +156,8 @@ async def _run(args: argparse.Namespace) -> int:
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    start_time = time.monotonic()
+
     try:
         async with TumblrClient(args.config) as client:
             logger.info(
@@ -172,6 +175,9 @@ async def _run(args: argparse.Namespace) -> int:
                 max_posts=args.max_posts,
             )
 
+            stats.api_calls = client.api_calls
+            stats.rate_limit = client._rate_limit
+
     except ConfigError as exc:
         logger.error("%s", exc)
         return _EXIT_CONFIG
@@ -179,6 +185,7 @@ async def _run(args: argparse.Namespace) -> int:
         logger.error("API error: %s", exc)
         return _EXIT_RUNTIME
 
+    stats.elapsed_seconds = time.monotonic() - start_time
     logger.info("\n%s", stats.summary())
     return _EXIT_OK
 

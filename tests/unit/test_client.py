@@ -118,6 +118,8 @@ def _stub_client() -> TumblrClient:
         client._oauth.sign.return_value = ("https://signed.url", {}, "")
         client._session = AsyncMock()
         client._limiter = AsyncRateLimiter(max_calls=1000, period=60.0)
+        client._rate_limit = 300
+        client.api_calls = 0
         return client
 
 

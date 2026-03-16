@@ -112,6 +112,8 @@ class TumblrClient:
         )
         self._session: AsyncSession = AsyncSession()  # type: ignore[type-arg]
         self._limiter = AsyncRateLimiter(max_calls=rate_limit, period=60.0)
+        self._rate_limit = rate_limit
+        self.api_calls: int = 0
 
     async def __aenter__(self) -> TumblrClient:
         return self
@@ -163,6 +165,7 @@ class TumblrClient:
                 headers=headers,
                 timeout=30,
             )
+            self.api_calls += 1
 
             if response.status_code == 429:
                 delay = min(

@@ -53,6 +53,9 @@ class DownloadStats:
         default_factory=_zero_counts,
     )
     posts_processed: int = 0
+    api_calls: int = 0
+    elapsed_seconds: float = 0.0
+    rate_limit: int = 300
 
     def record(
         self,
@@ -87,4 +90,26 @@ class DownloadStats:
         lines.append(
             f"Total: {self.posts_processed} posts processed, {total} files downloaded"
         )
+
+        # API and timing stats.
+        lines.append("")
+        lines.append("--- API Stats ---")
+
+        minutes = self.elapsed_seconds / 60.0
+        if minutes >= 1.0:
+            elapsed_str = f"{minutes:.1f}m"
+        else:
+            elapsed_str = f"{self.elapsed_seconds:.1f}s"
+        lines.append(f"  Run time: {elapsed_str}")
+        lines.append(f"  API calls: {self.api_calls}")
+
+        if self.elapsed_seconds > 0:
+            calls_per_min = self.api_calls / (self.elapsed_seconds / 60.0)
+            utilization = (calls_per_min / self.rate_limit) * 100
+            lines.append(f"  API calls/min: {calls_per_min:.1f}")
+            lines.append(
+                f"  Rate limit utilization: {utilization:.1f}% "
+                f"(limit: {self.rate_limit}/min)"
+            )
+
         return "\n".join(lines)
