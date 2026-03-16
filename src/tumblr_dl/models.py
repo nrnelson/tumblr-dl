@@ -34,6 +34,18 @@ class MediaItem:
     media_type: MediaType
     post_id: int
     blog_name: str
+    post_timestamp: int = 0
+
+
+@dataclass
+class BlogState:
+    """Persisted state for a blog's download cursor."""
+
+    blog_name: str
+    highest_post_id: int
+    newest_timestamp: int
+    total_posts_seen: int
+    last_run_at: str
 
 
 @dataclass
@@ -56,6 +68,8 @@ class DownloadStats:
     api_calls: int = 0
     elapsed_seconds: float = 0.0
     rate_limit: int = 300
+    early_stopped: bool = False
+    early_stop_post_id: int = 0
 
     def record(
         self,
@@ -90,6 +104,8 @@ class DownloadStats:
         lines.append(
             f"Total: {self.posts_processed} posts processed, {total} files downloaded"
         )
+        if self.early_stopped:
+            lines.append(f"  (stopped early at known post {self.early_stop_post_id})")
 
         # API and timing stats.
         lines.append("")

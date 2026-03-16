@@ -13,6 +13,7 @@ from tumblr_dl.client import TumblrClient
 from tumblr_dl.downloader import (
     DedupStrategy,
     FilesystemDedup,
+    SqliteDedup,
     download_item,
 )
 from tumblr_dl.exceptions import (
@@ -21,7 +22,8 @@ from tumblr_dl.exceptions import (
     TumblrDlError,
 )
 from tumblr_dl.extractors import extract_media
-from tumblr_dl.models import DownloadStats, DownloadStatus
+from tumblr_dl.models import DownloadStats, DownloadStatus, MediaItem, MediaType
+from tumblr_dl.tracker import DownloadTracker
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +67,26 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Maximum number of posts to process",
     )
     parser.add_argument(
+        "--db-path",
+        default=None,
+        help="SQLite database path (default: <output_dir>/.tumblr-dl.db)",
+    )
+    parser.add_argument(
+        "--no-db",
+        action="store_true",
+        help="Disable SQLite tracking; use filesystem-only dedup",
+    )
+    parser.add_argument(
+        "--full-scan",
+        action="store_true",
+        help="Ignore stored cursor; scan the entire blog",
+    )
+    parser.add_argument(
+        "--retry-failed",
+        action="store_true",
+        help="Re-download previously failed items before main scan",
+    )
+    parser.add_argument(
         "--debug",
         action="store_true",
         help="Enable debug logging",
@@ -87,13 +109,52 @@ def _configure_logging(debug: bool) -> None:
     pkg_logger.setLevel(logging.DEBUG if debug else logging.INFO)
 
 
+async def _retry_failed_downloads(
+    tracker: DownloadTracker,
+    blog_name: str,
+    output_dir: Path,
+    dedup: DedupStrategy,
+    stats: DownloadStats,
+) -> None:
+    """Re-attempt previously failed downloads.
+
+    Args:
+        tracker: The download tracker with failed records.
+        blog_name: Blog to retry failures for.
+        output_dir: Directory to save files into.
+        dedup: Duplicate detection strategy.
+        stats: Stats object to record results into.
+    """
+    failed = await tracker.get_failed_downloads(blog_name)
+    if not failed:
+        return
+
+    logger.info("Retrying %d previously failed download(s)...", len(failed))
+    for record in failed:
+        media_type = MediaType(record["media_type"])
+        item = MediaItem(
+            url=record["url"],
+            post_id=record["post_id"],
+            media_type=media_type,
+            blog_name=blog_name,
+        )
+        try:
+            status = await download_item(item, output_dir, dedup)
+        except DownloadError as exc:
+            logger.warning("Retry failed: %s", exc)
+            status = DownloadStatus.FAILED
+        stats.record(media_type, status)
+
+
 async def _download_blog(
     client: TumblrClient,
     blog_name: str,
     output_dir: Path,
     dedup: DedupStrategy,
+    tracker: DownloadTracker | None = None,
     start_offset: int = 0,
     max_posts: int | None = None,
+    full_scan: bool = False,
 ) -> DownloadStats:
     """Paginate through a blog and download all media.
 
@@ -102,8 +163,10 @@ async def _download_blog(
         blog_name: Blog to download from.
         output_dir: Directory to save files into.
         dedup: Duplicate detection strategy.
+        tracker: Optional SQLite tracker for incremental sync.
         start_offset: Post offset to begin at.
         max_posts: Stop after processing this many posts.
+        full_scan: If True, ignore stored cursor.
 
     Returns:
         Accumulated download statistics.
@@ -114,6 +177,23 @@ async def _download_blog(
     stats = DownloadStats()
     offset = start_offset
 
+    # Load the blog cursor for early termination.
+    highest_known_id = 0
+    last_known_ts = 0
+    if tracker and not full_scan:
+        blog_state = await tracker.get_blog_state(blog_name)
+        if blog_state:
+            highest_known_id = blog_state.highest_post_id
+            last_known_ts = blog_state.newest_timestamp
+            logger.info(
+                "Incremental sync: will stop at post ID %d (ts %d).",
+                highest_known_id,
+                last_known_ts,
+            )
+
+    run_highest_id = 0
+    run_newest_ts = 0
+
     while True:
         posts = await client.get_posts(blog_name, offset=offset, limit=_BATCH_SIZE)
         if not posts:
@@ -121,11 +201,37 @@ async def _download_blog(
             break
 
         for post in posts:
+            post_id: int = post["id"]
+            post_ts: int = post.get("timestamp", 0)
+
+            # Early termination: post already seen on a previous run.
+            # The API returns posts newest-published-first.  We stop when
+            # we reach a post whose *timestamp* is at-or-before our last
+            # known timestamp AND whose ID is at-or-below our cursor.
+            # Checking both handles queued/scheduled posts whose IDs may
+            # not align with publish order.
+            id_seen = highest_known_id and post_id <= highest_known_id
+            ts_seen = last_known_ts == 0 or post_ts <= last_known_ts
+            if id_seen and ts_seen:
+                logger.info(
+                    "Reached previously seen post %d "
+                    "(cursor: %d, ts: %d). Stopping.",
+                    post_id,
+                    highest_known_id,
+                    last_known_ts,
+                )
+                stats.early_stopped = True
+                stats.early_stop_post_id = post_id
+                break
+
+            run_highest_id = max(run_highest_id, post_id)
+            run_newest_ts = max(run_newest_ts, post_ts)
+
             stats.posts_processed += 1
             logger.info(
                 "Processing post %d (ID: %s, type: %s)...",
                 stats.posts_processed,
-                post.get("id"),
+                post_id,
                 post.get("type", "unknown"),
             )
 
@@ -142,9 +248,22 @@ async def _download_blog(
                     "Reached maximum posts (%d). Stopping.",
                     max_posts,
                 )
-                return stats
+                break
+
+        if stats.early_stopped:
+            break
+        if max_posts and stats.posts_processed >= max_posts:
+            break
 
         offset += _BATCH_SIZE
+
+    # Update the cursor with the high-water mark from this run.
+    if tracker and run_highest_id > 0:
+        new_highest = max(run_highest_id, highest_known_id)
+        await tracker.update_blog_state(
+            blog_name, new_highest, run_newest_ts, stats.posts_processed
+        )
+        logger.debug("Updated blog cursor: highest_post_id=%d", new_highest)
 
     return stats
 
@@ -166,14 +285,50 @@ async def _run(args: argparse.Namespace) -> int:
                 output_dir,
             )
 
-            stats = await _download_blog(
-                client=client,
-                blog_name=args.blog_name,
-                output_dir=output_dir,
-                dedup=FilesystemDedup(),
-                start_offset=args.start_post,
-                max_posts=args.max_posts,
-            )
+            # Set up tracker and dedup strategy.
+            if args.no_db:
+                tracker = None
+                dedup: DedupStrategy = FilesystemDedup()
+            else:
+                db_path = Path(
+                    args.db_path if args.db_path else output_dir / ".tumblr-dl.db"
+                )
+                tracker = DownloadTracker(db_path)
+                await tracker.open()
+                dedup = SqliteDedup(tracker)
+
+            try:
+                stats = DownloadStats()
+
+                # Retry previously failed downloads if requested.
+                if args.retry_failed and tracker:
+                    await _retry_failed_downloads(
+                        tracker, args.blog_name, output_dir, dedup, stats
+                    )
+
+                # Main download loop.
+                main_stats = await _download_blog(
+                    client=client,
+                    blog_name=args.blog_name,
+                    output_dir=output_dir,
+                    dedup=dedup,
+                    tracker=tracker,
+                    start_offset=args.start_post,
+                    max_posts=args.max_posts,
+                    full_scan=args.full_scan,
+                )
+
+                # Merge stats from retry pass into main stats.
+                for mt in MediaType:
+                    main_stats.found[mt] += stats.found[mt]
+                    main_stats.downloaded[mt] += stats.downloaded[mt]
+                    main_stats.skipped[mt] += stats.skipped[mt]
+                    main_stats.failed[mt] += stats.failed[mt]
+
+                stats = main_stats
+            finally:
+                if tracker:
+                    await tracker.close()
 
             stats.api_calls = client.api_calls
             stats.rate_limit = client._rate_limit

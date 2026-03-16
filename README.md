@@ -8,9 +8,11 @@ A CLI tool for downloading media (images, videos, audio) from Tumblr blogs using
 - Extracts embedded images from text and answer posts
 - Extracts video URLs from embedded iframes and NPF data attributes
 - Fully async architecture for concurrent I/O
-- Skips already-downloaded files (duplicate detection)
+- **Incremental sync** — tracks progress in SQLite; only fetches new posts on subsequent runs
+- Skips already-downloaded files (duplicate detection via DB + filesystem)
 - Resumable — start from any post offset
 - Paginates automatically through all blog posts
+- Re-download previously failed items with `--retry-failed`
 - Sanitizes filenames for cross-platform compatibility
 - Prints a summary of found/downloaded/skipped/failed files by type
 
@@ -66,6 +68,10 @@ tumblr-dl <blog_name> <output_dir> [options]
 | `--config PATH` | `~/.tumblr` | Path to YAML OAuth config file |
 | `--start-post N` | `0` | Post offset to start downloading from |
 | `--max-posts N` | *(all)* | Maximum number of posts to process |
+| `--db-path PATH` | `<output_dir>/.tumblr-dl.db` | SQLite database location |
+| `--no-db` | off | Disable SQLite tracking; use filesystem-only dedup |
+| `--full-scan` | off | Ignore stored cursor; scan the entire blog |
+| `--retry-failed` | off | Re-download previously failed items before main scan |
 | `--debug` | off | Enable debug logging |
 
 ### Examples
@@ -86,6 +92,25 @@ Resume from post offset 200 with a custom config file:
 
 ```bash
 tumblr-dl myblog ./downloads --start-post 200 --config ~/my-creds.yaml
+```
+
+Re-run and only fetch new posts (automatic — just run the same command again):
+
+```bash
+tumblr-dl myblog ./downloads  # first run: full scan, builds DB
+tumblr-dl myblog ./downloads  # second run: stops at last-seen post
+```
+
+Force a full re-scan ignoring the stored cursor:
+
+```bash
+tumblr-dl myblog ./downloads --full-scan
+```
+
+Retry previously failed downloads:
+
+```bash
+tumblr-dl myblog ./downloads --retry-failed
 ```
 
 ### Exit Codes
@@ -117,6 +142,17 @@ stack is accepted by Tumblr's CDN fingerprinting (unlike pure-Python clients lik
 `httpx` and `aiohttp`, which get HTTP 403 from Tumblr's nginx layer).
 
 OAuth1 request signing is handled by `oauthlib` directly.
+
+### Incremental sync with SQLite
+
+On first run, tumblr-dl scans the entire blog and stores the highest post ID in a
+SQLite database (`<output_dir>/.tumblr-dl.db`). On subsequent runs, it fetches posts
+newest-first and **stops as soon as it hits a previously-seen post ID**. This avoids
+re-fetching the entire blog via the API each time — only new posts are processed.
+
+The database also tracks individual file downloads (URL, status, file size), enabling
+`--retry-failed` to re-attempt only previously failed downloads. Use `--no-db` to
+disable tracking entirely, or `--full-scan` to ignore the stored cursor for one run.
 
 ### Why not `httpx`?
 
@@ -167,6 +203,7 @@ src/tumblr_dl/
 ├── exceptions.py      — TumblrDlError hierarchy
 ├── extractors.py      — media URL extraction per post type
 ├── models.py          — enums (DownloadStatus, MediaType) + dataclasses
+├── tracker.py         — SQLite-based download tracker for incremental sync
 └── utils.py           — sanitize_filename
 ```
 

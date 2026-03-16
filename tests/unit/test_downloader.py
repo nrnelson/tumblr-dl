@@ -54,42 +54,47 @@ def test_resolve_path_sanitizes_filename(tmp_path: Path) -> None:
 # --- FilesystemDedup tests ---
 
 
-def test_filesystem_dedup_detects_existing(tmp_path: Path) -> None:
+async def test_filesystem_dedup_detects_existing(tmp_path: Path) -> None:
     """Existing file is detected as duplicate."""
     item = _make_item()
     dest = tmp_path / "photo1.jpg"
     dest.touch()
 
     dedup = FilesystemDedup()
-    assert dedup.is_duplicate(item, dest) is True
+    assert await dedup.is_duplicate(item, dest) is True
 
 
-def test_filesystem_dedup_allows_new(tmp_path: Path) -> None:
+async def test_filesystem_dedup_allows_new(tmp_path: Path) -> None:
     """Non-existent file is not a duplicate."""
     item = _make_item()
     dest = tmp_path / "photo1.jpg"
 
     dedup = FilesystemDedup()
-    assert dedup.is_duplicate(item, dest) is False
+    assert await dedup.is_duplicate(item, dest) is False
 
 
-def test_filesystem_dedup_record_is_noop(tmp_path: Path) -> None:
+async def test_filesystem_dedup_record_is_noop(tmp_path: Path) -> None:
     """Record is a no-op and doesn't raise."""
     dedup = FilesystemDedup()
     item = _make_item()
     dest = tmp_path / "photo1.jpg"
-    dedup.record(item, dest, DownloadStatus.SUCCESS)
+    await dedup.record(item, dest, DownloadStatus.SUCCESS)
 
 
 # --- download_item tests ---
 
 
-@pytest.mark.asyncio
+def _make_async_dedup(is_dup: bool = False) -> AsyncMock:
+    """Create an AsyncMock dedup strategy."""
+    dedup = AsyncMock(spec=DedupStrategy)
+    dedup.is_duplicate.return_value = is_dup
+    return dedup
+
+
 async def test_download_item_skips_duplicate(tmp_path: Path) -> None:
     """Duplicate items return SKIPPED without downloading."""
     item = _make_item()
-    dedup = MagicMock(spec=DedupStrategy)
-    dedup.is_duplicate.return_value = True
+    dedup = _make_async_dedup(is_dup=True)
 
     status = await download_item(item, tmp_path, dedup)
 
@@ -97,12 +102,10 @@ async def test_download_item_skips_duplicate(tmp_path: Path) -> None:
     dedup.record.assert_not_called()
 
 
-@pytest.mark.asyncio
 async def test_download_item_success(tmp_path: Path) -> None:
     """Successful download returns SUCCESS and records it."""
     item = _make_item()
-    dedup = MagicMock(spec=DedupStrategy)
-    dedup.is_duplicate.return_value = False
+    dedup = _make_async_dedup()
 
     with patch(
         "tumblr_dl.downloader._async_download", new_callable=AsyncMock
@@ -116,12 +119,10 @@ async def test_download_item_success(tmp_path: Path) -> None:
     assert recorded_status is DownloadStatus.SUCCESS
 
 
-@pytest.mark.asyncio
 async def test_download_item_http_error(tmp_path: Path) -> None:
     """HTTP error raises DownloadError with status code context."""
     item = _make_item()
-    dedup = MagicMock(spec=DedupStrategy)
-    dedup.is_duplicate.return_value = False
+    dedup = _make_async_dedup()
 
     error = Exception("HTTP 404")
     mock_resp = MagicMock()
@@ -146,12 +147,10 @@ async def test_download_item_http_error(tmp_path: Path) -> None:
     assert recorded_status is DownloadStatus.FAILED
 
 
-@pytest.mark.asyncio
 async def test_download_item_network_error(tmp_path: Path) -> None:
     """Network error raises DownloadError without status code."""
     item = _make_item()
-    dedup = MagicMock(spec=DedupStrategy)
-    dedup.is_duplicate.return_value = False
+    dedup = _make_async_dedup()
 
     with (
         patch(

@@ -41,11 +41,11 @@ class DedupStrategy(abc.ABC):
     """
 
     @abc.abstractmethod
-    def is_duplicate(self, item: MediaItem, dest: Path) -> bool:
+    async def is_duplicate(self, item: MediaItem, dest: Path) -> bool:
         """Return True if the item should be skipped."""
 
     @abc.abstractmethod
-    def record(
+    async def record(
         self,
         item: MediaItem,
         dest: Path,
@@ -57,17 +57,63 @@ class DedupStrategy(abc.ABC):
 class FilesystemDedup(DedupStrategy):
     """Skip files that already exist on disk."""
 
-    def is_duplicate(self, item: MediaItem, dest: Path) -> bool:
+    async def is_duplicate(self, item: MediaItem, dest: Path) -> bool:
         """Check if the destination file already exists."""
         return dest.exists()
 
-    def record(
+    async def record(
         self,
         item: MediaItem,
         dest: Path,
         status: DownloadStatus,
     ) -> None:
         """No-op for filesystem-based dedup."""
+
+
+class SqliteDedup(DedupStrategy):
+    """Dedup using a SQLite download tracker, with filesystem fallback.
+
+    Args:
+        tracker: An open DownloadTracker instance.
+    """
+
+    def __init__(self, tracker: object) -> None:
+        # Import here to avoid circular dependency; runtime type is DownloadTracker.
+        self._tracker = tracker
+
+    async def is_duplicate(self, item: MediaItem, dest: Path) -> bool:
+        """Check DB first, then filesystem as fallback."""
+        from tumblr_dl.tracker import DownloadTracker
+
+        tracker: DownloadTracker = self._tracker  # type: ignore[assignment]
+        if await tracker.is_downloaded(item.blog_name, item.url):
+            return True
+        return dest.exists()
+
+    async def record(
+        self,
+        item: MediaItem,
+        dest: Path,
+        status: DownloadStatus,
+    ) -> None:
+        """Record download result in the database."""
+        if status is DownloadStatus.SKIPPED:
+            return
+        from tumblr_dl.tracker import DownloadTracker
+
+        tracker: DownloadTracker = self._tracker  # type: ignore[assignment]
+        file_size: int | None = None
+        if status is DownloadStatus.SUCCESS and dest.exists():
+            file_size = dest.stat().st_size
+        await tracker.record_download(
+            blog_name=item.blog_name,
+            post_id=item.post_id,
+            url=item.url,
+            file_path=str(dest),
+            media_type=item.media_type.value,
+            status=status.value,
+            file_size=file_size,
+        )
 
 
 def _resolve_path(item: MediaItem, output_dir: Path) -> Path:
@@ -78,7 +124,11 @@ def _resolve_path(item: MediaItem, output_dir: Path) -> Path:
 
 
 async def _async_download(url: str, dest: Path, blog_name: str) -> None:
-    """Download a file using native async HTTP."""
+    """Download a file using native async HTTP.
+
+    Writes to a temporary file first, then renames on success.
+    This prevents 0-byte files from being left behind on failure.
+    """
     headers = {
         "User-Agent": _USER_AGENT,
         "Referer": f"https://{blog_name}.tumblr.com/",
@@ -87,10 +137,16 @@ async def _async_download(url: str, dest: Path, blog_name: str) -> None:
     response = await session.get(url, headers=headers, stream=True, timeout=30)
     response.raise_for_status()
 
-    with dest.open("wb") as fh:
-        for chunk in response.iter_content(chunk_size=8192):
-            if chunk:
-                fh.write(chunk)
+    tmp = dest.with_suffix(dest.suffix + ".part")
+    try:
+        with tmp.open("wb") as fh:
+            async for chunk in response.aiter_content():
+                if chunk:
+                    fh.write(chunk)
+        tmp.rename(dest)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
 
 
 async def download_item(
@@ -113,7 +169,7 @@ async def download_item(
     """
     dest = _resolve_path(item, output_dir)
 
-    if dedup.is_duplicate(item, dest):
+    if await dedup.is_duplicate(item, dest):
         logger.debug("Skipping (exists): %s", item.url)
         return DownloadStatus.SKIPPED
 
@@ -122,11 +178,11 @@ async def download_item(
     try:
         await _async_download(item.url, dest, item.blog_name)
 
-        dedup.record(item, dest, DownloadStatus.SUCCESS)
+        await dedup.record(item, dest, DownloadStatus.SUCCESS)
         return DownloadStatus.SUCCESS
 
     except Exception as exc:
-        dedup.record(item, dest, DownloadStatus.FAILED)
+        await dedup.record(item, dest, DownloadStatus.FAILED)
         status_code = getattr(getattr(exc, "response", None), "status_code", None)
         if status_code is not None:
             raise DownloadError(

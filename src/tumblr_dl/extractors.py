@@ -31,6 +31,7 @@ def extract_media(post: dict[str, Any], blog_name: str) -> list[MediaItem]:
     """
     post_type = post.get("type", "unknown")
     post_id: int = post["id"]
+    post_timestamp: int = post.get("timestamp", 0)
 
     extractors = {
         "photo": _extract_photo,
@@ -66,6 +67,7 @@ def extract_media(post: dict[str, Any], blog_name: str) -> list[MediaItem]:
             media_type=media_type,
             post_id=post_id,
             blog_name=blog_name,
+            post_timestamp=post_timestamp,
         )
         for url, media_type in raw
     ]
