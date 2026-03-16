@@ -138,6 +138,25 @@ Search by tag across all of Tumblr:
 tumblr-dl --tag landscape --max-posts 200
 ```
 
+> **Known limitation:** The `--tag` option uses Tumblr's `/v2/tagged` API endpoint,
+> which is a legacy endpoint that returns **incomplete results** compared to the web
+> interface at `tumblr.com/tagged/<tag>`. For example, a tag like `filmphotography`
+> may show 50+ posts when scrolling on the website but only return ~20 via the API.
+> This is a confirmed server-side limitation
+> ([tumblr/docs#136](https://github.com/tumblr/docs/issues/136),
+> [tumblr/docs#77](https://github.com/tumblr/docs/issues/77)):
+>
+> - The API only indexes posts where the tag appears in the **first 5 tags** (the web
+>   UI indexes the first 20).
+> - The endpoint applies undocumented spam/quality filtering.
+> - Timestamp-based pagination is unreliable because the underlying tag index doesn't
+>   store publish timestamps
+>   ([tumblr/docs#131](https://github.com/tumblr/docs/issues/131)).
+>
+> There are no query parameters that can work around this. For complete results from
+> a **specific blog**, use `tumblr-dl blogname` instead — the blog endpoint
+> exhaustively paginates all posts.
+
 Download a blog but skip posts with certain tags:
 
 ```bash

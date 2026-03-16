@@ -191,12 +191,13 @@ async def test_client_context_manager(tmp_path: Path) -> None:
 
     with patch("tumblr_dl.client.AsyncSession") as mock_session_cls:
         mock_session = MagicMock()
+        mock_session.close = AsyncMock()
         mock_session_cls.return_value = mock_session
 
         async with TumblrClient(config_file) as client:
             assert client is not None
 
-        mock_session.close.assert_called_once()
+        mock_session.close.assert_awaited_once()
 
 
 # --- 429 retry tests ---

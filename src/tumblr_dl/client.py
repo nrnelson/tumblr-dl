@@ -124,11 +124,11 @@ class TumblrClient:
         exc_val: BaseException | None,
         exc_tb: object,
     ) -> None:
-        self.close()
+        await self.close()
 
-    def close(self) -> None:
+    async def close(self) -> None:
         """Close the underlying HTTP session."""
-        self._session.close()  # type: ignore[unused-coroutine]
+        await self._session.close()
 
     def _sign_url(self, url: str) -> tuple[str, dict[str, str]]:
         """Sign a URL with OAuth1 and return (signed_url, headers)."""

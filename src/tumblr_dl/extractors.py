@@ -45,6 +45,7 @@ def extract_media(
         "audio": _extract_audio,
         "text": _extract_embedded_media,
         "answer": _extract_embedded_media,
+        "blocks": _extract_npf_blocks,
     }
 
     extractor = extractors.get(post_type)
@@ -244,6 +245,66 @@ def _extract_content_labels(post: dict[str, Any]) -> list[str]:
                 )
 
     return labels
+
+
+def _extract_npf_blocks(
+    post: dict[str, Any],
+) -> list[_RawMedia]:
+    """Extract media from NPF (Neue Post Format) content blocks.
+
+    NPF posts have a ``content`` array of typed blocks. Each block's
+    ``type`` determines how to extract media URLs:
+    - ``image``: ``media`` array with ``url`` entries (pick largest).
+    - ``video``: ``media`` object with ``url``, or top-level ``url``.
+    - ``audio``: ``media`` object with ``url``, or top-level ``url``.
+    """
+    content = post.get("content")
+    if not isinstance(content, list):
+        return []
+
+    items: list[_RawMedia] = []
+    for block in content:
+        if not isinstance(block, dict):
+            continue
+
+        block_type = block.get("type")
+
+        if block_type == "image":
+            media_list = block.get("media")
+            if isinstance(media_list, list) and media_list:
+                # Pick the largest (first entry is typically original size).
+                best = media_list[0]
+                url = best.get("url")
+                if isinstance(url, str) and url:
+                    items.append((url, MediaType.IMAGE))
+
+        elif block_type == "video":
+            url = _npf_media_url(block)
+            if url:
+                items.append((url, MediaType.VIDEO))
+
+        elif block_type == "audio":
+            url = _npf_media_url(block)
+            if url:
+                items.append((url, MediaType.AUDIO))
+
+    return items
+
+
+def _npf_media_url(block: dict[str, Any]) -> str | None:
+    """Extract the media URL from an NPF video/audio block.
+
+    Checks ``block["media"]["url"]`` first, then ``block["url"]``.
+    """
+    media = block.get("media")
+    if isinstance(media, dict):
+        url = media.get("url")
+        if isinstance(url, str) and url:
+            return url
+    url = block.get("url")
+    if isinstance(url, str) and url:
+        return url
+    return None
 
 
 def _extract_photo(
