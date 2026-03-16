@@ -49,8 +49,10 @@ def _build_parser() -> argparse.ArgumentParser:
         help="The Tumblr blog name (e.g. 'example'). Optional with --tag.",
     )
     parser.add_argument(
-        "output_dir",
-        help="Directory to save downloaded media",
+        "--output-dir",
+        "-o",
+        default="tumblr_downloads",
+        help="Directory to save downloaded media (default: tumblr_downloads/)",
     )
     parser.add_argument(
         "--config",

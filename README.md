@@ -55,7 +55,7 @@ To obtain these credentials:
 ## Usage
 
 ```bash
-tumblr-dl <blog_name> <output_dir> [options]
+tumblr-dl <blog_name> [options]
 ```
 
 ### Arguments
@@ -63,12 +63,12 @@ tumblr-dl <blog_name> <output_dir> [options]
 | Argument | Description |
 |----------|-------------|
 | `blog_name` | The Tumblr blog name (e.g. `example` for example.tumblr.com). Optional with `--tag`. |
-| `output_dir` | Directory to save downloaded media |
 
 ### Options
 
 | Option | Default | Description |
 |--------|---------|-------------|
+| `-o`, `--output-dir DIR` | `tumblr_downloads/` | Directory to save downloaded media |
 | `--config PATH` | `~/.tumblr` | Path to YAML OAuth config file |
 | `--start-post N` | `0` | Post offset to start downloading from |
 | `--max-posts N` | *(all)* | Maximum number of posts to process |
@@ -82,59 +82,65 @@ tumblr-dl <blog_name> <output_dir> [options]
 
 ### Examples
 
-Download all media from a blog:
+Download all media from a blog (saves to `tumblr_downloads/`):
 
 ```bash
-tumblr-dl myblog ./downloads
+tumblr-dl myblog
+```
+
+Download to a custom directory:
+
+```bash
+tumblr-dl myblog -o ~/media/myblog
 ```
 
 Download the first 100 posts with debug output:
 
 ```bash
-tumblr-dl myblog ./downloads --max-posts 100 --debug
+tumblr-dl myblog --max-posts 100 --debug
 ```
 
 Resume from post offset 200 with a custom config file:
 
 ```bash
-tumblr-dl myblog ./downloads --start-post 200 --config ~/my-creds.yaml
+tumblr-dl myblog --start-post 200 --config ~/my-creds.yaml
 ```
 
 Re-run and only fetch new posts (automatic — just run the same command again):
 
 ```bash
-tumblr-dl myblog ./downloads  # first run: full scan, builds DB
-tumblr-dl myblog ./downloads  # second run: stops at last-seen post
+tumblr-dl myblog  # first run: full scan, builds DB
+tumblr-dl myblog  # second run: stops at last-seen post
 ```
 
 Force a full re-scan ignoring the stored cursor:
 
 ```bash
-tumblr-dl myblog ./downloads --full-scan
+tumblr-dl myblog --full-scan
 ```
 
 Retry previously failed downloads:
 
 ```bash
-tumblr-dl myblog ./downloads --retry-failed
+tumblr-dl myblog --retry-failed
 ```
 
 Search by tag across all of Tumblr:
 
 ```bash
-tumblr-dl --tag landscape ./downloads --max-posts 200
+tumblr-dl --tag landscape --max-posts 200
 ```
 
 Download a blog but skip posts with certain tags:
 
 ```bash
-tumblr-dl myblog ./downloads --exclude-tags "gore*,explicit,minors"
+tumblr-dl myblog --exclude-tags "gore*,explicit,minors"
 ```
 
 Combine tag search with tag exclusion:
 
 ```bash
-tumblr-dl --tag photography ./downloads --exclude-tags "ai*,generated" --max-posts 500
+tumblr-dl --tag photography --exclude-tags "ai*,generated" --max-posts 500
 ```
 
 ### Exit Codes

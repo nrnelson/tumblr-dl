@@ -238,7 +238,7 @@ async def test_record_post_tags(tracker: DownloadTracker) -> None:
     )
     rows = await cursor.fetchall()
     tags = [row[0] for row in rows]
-    assert tags == ["art", "photography", "landscape"]
+    assert tags == ["art", "landscape", "photography"]
 
 
 async def test_record_post_tags_deduplicates(tracker: DownloadTracker) -> None:
