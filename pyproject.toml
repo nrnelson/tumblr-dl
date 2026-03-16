@@ -1,0 +1,55 @@
+[build-system]
+requires = ["setuptools>=70.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tumblr-dl"
+version = "0.1.0"
+description = "CLI tool for downloading media from Tumblr blogs via the Tumblr API v2"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [
+    { name = "Nathan Nelson", email = "nrnelson@gmail.com" },
+]
+
+dependencies = [
+    "pytumblr>=0.1.2,<1.0",
+    "requests>=2.28,<3.0",
+    "beautifulsoup4>=4.12,<5.0",
+    "pyyaml>=6.0,<7.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "ruff>=0.4",
+    "mypy>=1.10",
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+    "pre-commit>=3.0",
+    "types-requests>=2.28",
+    "types-PyYAML>=6.0",
+    "types-beautifulsoup4>=4.12",
+]
+
+[project.scripts]
+tumblr-dl = "tumblr_dl.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "C4", "SIM", "PGH"]
+
+[tool.ruff.format]
+docstring-code-format = true
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

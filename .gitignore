@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+*.egg
+dist/
+build/
+*.whl
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+
+# IDE / tooling
+.vscode/
+.idea/
+.claude/
+.devcontainer/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Project-specific
+*.db
+downloads/
+*.lsv
+*.bin
+
+# Secrets
+.env
+.tumblr
