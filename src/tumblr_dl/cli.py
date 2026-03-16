@@ -23,7 +23,13 @@ from tumblr_dl.exceptions import (
     TumblrDlError,
 )
 from tumblr_dl.extractors import extract_media, extract_post_metadata
-from tumblr_dl.models import DownloadStats, DownloadStatus, MediaItem, MediaType
+from tumblr_dl.models import (
+    DownloadStats,
+    DownloadStatus,
+    MediaItem,
+    MediaType,
+    PostMetadata,
+)
 from tumblr_dl.tracker import DownloadTracker
 
 logger = logging.getLogger(__name__)
@@ -102,6 +108,11 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Comma-separated glob patterns to exclude (e.g. 'nsfw,explicit*')",
     )
     parser.add_argument(
+        "--exclude-blogs",
+        default=None,
+        help="Comma-separated glob patterns of blog names to exclude",
+    )
+    parser.add_argument(
         "--debug",
         action="store_true",
         help="Enable debug logging",
@@ -131,23 +142,36 @@ def _parse_exclude_patterns(raw: str | None) -> list[str]:
     return [p.strip().lower() for p in raw.split(",") if p.strip()]
 
 
-def _matches_exclusion(tags: list[str], patterns: list[str]) -> str | None:
-    """Check if any tag matches any exclusion pattern.
+def _matches_exclusion(values: list[str], patterns: list[str]) -> str | None:
+    """Check if any value matches any exclusion pattern.
 
     Uses case-insensitive fnmatch glob matching.
 
     Args:
-        tags: Lowercase tag list from the post.
-        patterns: Lowercase glob patterns from --exclude-tags.
+        values: Lowercase strings to check (tags, blog names, etc.).
+        patterns: Lowercase glob patterns.
 
     Returns:
-        The first matching tag string, or None if no match.
+        The first matching string, or None if no match.
     """
-    for tag in tags:
+    for value in values:
         for pattern in patterns:
-            if fnmatch.fnmatch(tag, pattern):
-                return tag
+            if fnmatch.fnmatch(value, pattern):
+                return value
     return None
+
+
+def _collect_trail_blogs(metadata: PostMetadata) -> list[str]:
+    """Collect all blog names from a post's reblog trail.
+
+    Returns lowercase blog names from the trail entries,
+    excluding None (deleted blogs).
+    """
+    blogs: list[str] = []
+    for entry in metadata.trail:
+        if entry.blog_name:
+            blogs.append(entry.blog_name.lower())
+    return blogs
 
 
 async def _retry_failed_downloads(
@@ -197,6 +221,7 @@ async def _download_blog(
     max_posts: int | None = None,
     full_scan: bool = False,
     exclude_patterns: list[str] | None = None,
+    exclude_blog_patterns: list[str] | None = None,
 ) -> DownloadStats:
     """Paginate through a blog and download all media.
 
@@ -294,6 +319,26 @@ async def _download_blog(
                         )
                     continue
 
+            # Blog exclusion check — skip if any blog in the reblog
+            # trail matches an excluded pattern.
+            if exclude_blog_patterns:
+                trail_blogs = _collect_trail_blogs(metadata)
+                matched_blog = _matches_exclusion(trail_blogs, exclude_blog_patterns)
+                if matched_blog:
+                    logger.info(
+                        "Skipping post %d: reblogged from excluded blog '%s'.",
+                        post_id,
+                        matched_blog,
+                    )
+                    if tracker:
+                        await tracker.record_skipped_post(
+                            blog_name,
+                            post_id,
+                            "blog_exclusion",
+                            matched_blog,
+                        )
+                    continue
+
             for item in extract_media(post, blog_name, metadata=metadata):
                 try:
                     status = await download_item(item, output_dir, dedup)
@@ -335,6 +380,7 @@ async def _download_tagged(
     tracker: DownloadTracker | None = None,
     max_posts: int | None = None,
     exclude_patterns: list[str] | None = None,
+    exclude_blog_patterns: list[str] | None = None,
 ) -> DownloadStats:
     """Search by tag across Tumblr and download matching media.
 
@@ -399,6 +445,25 @@ async def _download_tagged(
                         )
                     continue
 
+            # Blog exclusion check.
+            if exclude_blog_patterns:
+                trail_blogs = _collect_trail_blogs(metadata)
+                matched_blog = _matches_exclusion(trail_blogs, exclude_blog_patterns)
+                if matched_blog:
+                    logger.info(
+                        "Skipping post %d: reblogged from excluded blog '%s'.",
+                        post_id,
+                        matched_blog,
+                    )
+                    if tracker:
+                        await tracker.record_skipped_post(
+                            post_blog,
+                            post_id,
+                            "blog_exclusion",
+                            matched_blog,
+                        )
+                    continue
+
             for item in extract_media(post, post_blog, metadata=metadata):
                 try:
                     status = await download_item(item, output_dir, dedup)
@@ -442,6 +507,7 @@ async def _run(args: argparse.Namespace) -> int:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     exclude_patterns = _parse_exclude_patterns(args.exclude_tags)
+    exclude_blog_patterns = _parse_exclude_patterns(args.exclude_blogs)
 
     start_time = time.monotonic()
 
@@ -485,6 +551,7 @@ async def _run(args: argparse.Namespace) -> int:
                         tracker=tracker,
                         max_posts=args.max_posts,
                         exclude_patterns=exclude_patterns,
+                        exclude_blog_patterns=exclude_blog_patterns,
                     )
                 else:
                     # Blog download mode.
@@ -505,6 +572,7 @@ async def _run(args: argparse.Namespace) -> int:
                         max_posts=args.max_posts,
                         full_scan=args.full_scan,
                         exclude_patterns=exclude_patterns,
+                        exclude_blog_patterns=exclude_blog_patterns,
                     )
 
                     # Merge stats from retry pass into main stats.

@@ -78,6 +78,7 @@ tumblr-dl <blog_name> [options]
 | `--retry-failed` | off | Re-download previously failed items before main scan |
 | `--tag TAG` | off | Search Tumblr by tag instead of downloading a specific blog |
 | `--exclude-tags PATTERNS` | off | Comma-separated glob patterns to exclude (e.g. `nsfw,explicit*`) |
+| `--exclude-blogs PATTERNS` | off | Comma-separated glob patterns of blog names to skip in reblog trails |
 | `--debug` | off | Enable debug logging |
 
 ### Examples
@@ -137,10 +138,16 @@ Download a blog but skip posts with certain tags:
 tumblr-dl myblog --exclude-tags "gore*,explicit,minors"
 ```
 
-Combine tag search with tag exclusion:
+Skip posts reblogged from specific blogs:
 
 ```bash
-tumblr-dl --tag photography --exclude-tags "ai*,generated" --max-posts 500
+tumblr-dl myblog --exclude-blogs "spambot*,unwantedblog"
+```
+
+Combine tag search with tag and blog exclusion:
+
+```bash
+tumblr-dl --tag photography --exclude-tags "ai*,generated" --exclude-blogs "spambot*" --max-posts 500
 ```
 
 ### Exit Codes

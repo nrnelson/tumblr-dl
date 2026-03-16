@@ -1,8 +1,13 @@
-"""Unit tests for CLI helpers (tag exclusion matching)."""
+"""Unit tests for CLI helpers (tag and blog exclusion matching)."""
 
 from __future__ import annotations
 
-from tumblr_dl.cli import _matches_exclusion, _parse_exclude_patterns
+from tumblr_dl.cli import (
+    _collect_trail_blogs,
+    _matches_exclusion,
+    _parse_exclude_patterns,
+)
+from tumblr_dl.models import PostMetadata, TrailEntry
 
 # --- _parse_exclude_patterns ---
 
@@ -83,3 +88,95 @@ def test_matches_question_mark_glob() -> None:
     """Glob ? matches single character."""
     assert _matches_exclusion(["nsf1"], ["nsf?"]) == "nsf1"
     assert _matches_exclusion(["nsfww"], ["nsf?"]) is None
+
+
+# --- _collect_trail_blogs ---
+
+
+def test_collect_trail_blogs_returns_lowercase_names() -> None:
+    """Trail blog names are collected and lowercased."""
+    metadata = PostMetadata(
+        blog_name="myblog",
+        post_id=100,
+        post_url="",
+        post_timestamp=0,
+        trail=[
+            TrailEntry(
+                position=0,
+                blog_name="OriginalPoster",
+                post_id=1,
+                timestamp=None,
+                is_root=True,
+            ),
+            TrailEntry(
+                position=1,
+                blog_name="Reblogger",
+                post_id=2,
+                timestamp=None,
+                is_root=False,
+            ),
+        ],
+    )
+    blogs = _collect_trail_blogs(metadata)
+    assert blogs == ["originalposter", "reblogger"]
+
+
+def test_collect_trail_blogs_skips_none() -> None:
+    """Deleted blogs (None name) are excluded from the list."""
+    metadata = PostMetadata(
+        blog_name="myblog",
+        post_id=100,
+        post_url="",
+        post_timestamp=0,
+        trail=[
+            TrailEntry(
+                position=0,
+                blog_name=None,
+                post_id=None,
+                timestamp=None,
+                is_root=True,
+            ),
+            TrailEntry(
+                position=1,
+                blog_name="goodblog",
+                post_id=2,
+                timestamp=None,
+                is_root=False,
+            ),
+        ],
+    )
+    blogs = _collect_trail_blogs(metadata)
+    assert blogs == ["goodblog"]
+
+
+def test_collect_trail_blogs_empty_trail() -> None:
+    """Empty trail returns empty list."""
+    metadata = PostMetadata(
+        blog_name="myblog",
+        post_id=100,
+        post_url="",
+        post_timestamp=0,
+    )
+    assert _collect_trail_blogs(metadata) == []
+
+
+# --- Blog exclusion end-to-end matching ---
+
+
+def test_blog_exclusion_matches_trail_entry() -> None:
+    """A blog in the trail matching an exclusion pattern is detected."""
+    trail_blogs = ["originalposter", "middleman", "spambot123"]
+    matched = _matches_exclusion(trail_blogs, ["spambot*"])
+    assert matched == "spambot123"
+
+
+def test_blog_exclusion_exact_match() -> None:
+    """Exact blog name match works."""
+    trail_blogs = ["goodblog", "badblog", "otherblog"]
+    assert _matches_exclusion(trail_blogs, ["badblog"]) == "badblog"
+
+
+def test_blog_exclusion_no_match() -> None:
+    """No match when trail blogs are all clean."""
+    trail_blogs = ["goodblog", "niceblog"]
+    assert _matches_exclusion(trail_blogs, ["spambot*", "badblog"]) is None
