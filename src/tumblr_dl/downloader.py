@@ -3,13 +3,11 @@
 from __future__ import annotations
 
 import abc
-import asyncio
-import functools
 import logging
 from pathlib import Path
 from urllib.parse import urlparse
 
-import requests
+from curl_cffi.requests import AsyncSession
 
 from tumblr_dl.exceptions import DownloadError
 from tumblr_dl.models import DownloadStatus, MediaItem
@@ -22,6 +20,17 @@ _USER_AGENT = (
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/91.0.4472.124 Safari/537.36"
 )
+
+# Shared session for all downloads within a process.
+_session: AsyncSession | None = None  # type: ignore[type-arg]
+
+
+def _get_session() -> AsyncSession:  # type: ignore[type-arg]
+    """Return the shared download session, creating it if needed."""
+    global _session  # noqa: PLW0603
+    if _session is None:
+        _session = AsyncSession()
+    return _session
 
 
 class DedupStrategy(abc.ABC):
@@ -68,13 +77,14 @@ def _resolve_path(item: MediaItem, output_dir: Path) -> Path:
     return output_dir / safe_name
 
 
-def _sync_download(url: str, dest: Path, blog_name: str) -> None:
-    """Download a file synchronously (run in thread pool)."""
+async def _async_download(url: str, dest: Path, blog_name: str) -> None:
+    """Download a file using native async HTTP."""
     headers = {
         "User-Agent": _USER_AGENT,
         "Referer": f"https://{blog_name}.tumblr.com/",
     }
-    response = requests.get(url, stream=True, headers=headers, timeout=30)
+    session = _get_session()
+    response = await session.get(url, headers=headers, stream=True, timeout=30)
     response.raise_for_status()
 
     with dest.open("wb") as fh:
@@ -110,28 +120,24 @@ async def download_item(
     logger.info("Downloading: %s -> %s", item.url, dest.name)
 
     try:
-        await asyncio.to_thread(
-            functools.partial(_sync_download, item.url, dest, item.blog_name)
-        )
+        await _async_download(item.url, dest, item.blog_name)
 
         dedup.record(item, dest, DownloadStatus.SUCCESS)
         return DownloadStatus.SUCCESS
 
-    except requests.HTTPError as exc:
+    except Exception as exc:
         dedup.record(item, dest, DownloadStatus.FAILED)
-        status_code = exc.response.status_code if exc.response is not None else None
-        raise DownloadError(
-            f"Download failed ({status_code}): {item.url}",
-            context={
-                "url": item.url,
-                "post_id": item.post_id,
-                "blog": item.blog_name,
-                "status_code": status_code,
-            },
-        ) from exc
-
-    except requests.RequestException as exc:
-        dedup.record(item, dest, DownloadStatus.FAILED)
+        status_code = getattr(getattr(exc, "response", None), "status_code", None)
+        if status_code is not None:
+            raise DownloadError(
+                f"Download failed ({status_code}): {item.url}",
+                context={
+                    "url": item.url,
+                    "post_id": item.post_id,
+                    "blog": item.blog_name,
+                    "status_code": status_code,
+                },
+            ) from exc
         raise DownloadError(
             f"Download failed: {item.url}",
             context={

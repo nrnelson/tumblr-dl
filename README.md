@@ -108,26 +108,29 @@ tumblr-dl myblog ./downloads --start-post 200 --config ~/my-creds.yaml
 
 ## Architecture
 
-### Async with `requests` via thread pool
+### Native async with `curl_cffi`
 
-This project uses an async (`asyncio`) architecture, but delegates HTTP calls to
-`requests`/`requests-oauthlib` running in thread pools via `asyncio.to_thread()`.
+This project uses a fully async (`asyncio`) architecture with
+[curl_cffi](https://github.com/lexiforest/curl_cffi) for HTTP. curl_cffi provides
+native async support via `AsyncSession` and uses libcurl under the hood, whose TLS
+stack is accepted by Tumblr's CDN fingerprinting (unlike pure-Python clients like
+`httpx` and `aiohttp`, which get HTTP 403 from Tumblr's nginx layer).
 
-This is intentional: Tumblr's API and CDN employ TLS fingerprinting that rejects
-connections from pure-Python HTTP clients like `httpx` and `aiohttp` (both return
-HTTP 403 from Tumblr's nginx layer regardless of valid OAuth credentials). The
-`requests` library uses `urllib3`, whose TLS stack is accepted by Tumblr.
+OAuth1 request signing is handled by `oauthlib` directly.
 
-The async wrapper still provides:
-- Non-blocking pagination delays (`asyncio.sleep`)
-- Foundation for concurrent downloads in future versions
-- Clean async context manager lifecycle for the API client
+### Why not `httpx`?
+
+Tumblr's API and CDN use TLS fingerprinting (JA3/JA4) to block non-browser clients.
+Python's `ssl` module — used by `httpx` and `aiohttp` — produces a recognizable
+TLS ClientHello that Tumblr rejects with 403. There is no way to customize cipher
+ordering, TLS extension ordering, or other fingerprint parameters through `httpx`,
+even with custom transports or SSL contexts.
 
 ### Why not `pytumblr`?
 
 The official `pytumblr` library was replaced with a direct Tumblr API v2 client
 because pytumblr is synchronous-only, and we only need the `GET /posts` endpoint.
-Our client is ~170 lines vs pytumblr's ~770, with full type safety and async support.
+Our client is ~160 lines vs pytumblr's ~770, with full type safety and async support.
 
 ## Development
 

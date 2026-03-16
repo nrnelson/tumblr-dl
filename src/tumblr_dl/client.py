@@ -2,14 +2,12 @@
 
 from __future__ import annotations
 
-import asyncio
-import functools
 from pathlib import Path
 from typing import Any
 
-import requests
 import yaml
-from requests_oauthlib import OAuth1  # type: ignore[import-untyped]
+from curl_cffi.requests import AsyncSession
+from oauthlib.oauth1 import Client as OAuth1Client
 
 from tumblr_dl.exceptions import ApiError, ConfigError
 
@@ -76,8 +74,8 @@ def _normalize_blog_name(blog_name: str) -> str:
 class TumblrClient:
     """Async Tumblr API v2 client with OAuth1 authentication.
 
-    Uses requests + requests-oauthlib under the hood (run in a
-    thread pool) for TLS compatibility with Tumblr's CDN.
+    Uses curl_cffi for native async HTTP with TLS compatibility,
+    and oauthlib for OAuth1 request signing.
 
     Args:
         config_path: Path to YAML OAuth credentials file.
@@ -90,14 +88,13 @@ class TumblrClient:
 
     def __init__(self, config_path: str | Path) -> None:
         creds = load_config(config_path)
-        self._auth = OAuth1(
+        self._oauth = OAuth1Client(
             creds["consumer_key"],
             client_secret=creds["consumer_secret"],
             resource_owner_key=creds["oauth_token"],
             resource_owner_secret=creds["oauth_token_secret"],
         )
-        self._session = requests.Session()
-        self._session.auth = self._auth
+        self._session: AsyncSession = AsyncSession()  # type: ignore[type-arg]
 
     async def __aenter__(self) -> TumblrClient:
         return self
@@ -112,7 +109,12 @@ class TumblrClient:
 
     def close(self) -> None:
         """Close the underlying HTTP session."""
-        self._session.close()
+        self._session.close()  # type: ignore[unused-coroutine]
+
+    def _sign_url(self, url: str) -> tuple[str, dict[str, str]]:
+        """Sign a URL with OAuth1 and return (signed_url, headers)."""
+        uri, headers, _ = self._oauth.sign(url, http_method="GET")
+        return uri, dict(headers)
 
     async def get_posts(
         self,
@@ -134,29 +136,27 @@ class TumblrClient:
             ApiError: If the API request fails or response is malformed.
         """
         hostname = _normalize_blog_name(blog_name)
-        url = f"{_API_BASE}/blog/{hostname}/posts"
+        url = f"{_API_BASE}/blog/{hostname}/posts?offset={offset}&limit={limit}"
 
         try:
-            response = await asyncio.to_thread(
-                functools.partial(
-                    self._session.get,
-                    url,
-                    params={"offset": offset, "limit": limit},
-                    timeout=30,
-                )
+            signed_url, headers = self._sign_url(url)
+            response = await self._session.get(
+                signed_url,
+                headers=headers,
+                timeout=30,
             )
             response.raise_for_status()
-        except requests.HTTPError as exc:
-            status = exc.response.status_code if exc.response is not None else None
-            raise ApiError(
-                f"API returned {status}",
-                context={
-                    "blog": blog_name,
-                    "offset": offset,
-                    "status_code": status,
-                },
-            ) from exc
-        except requests.RequestException as exc:
+        except Exception as exc:
+            status = getattr(getattr(exc, "response", None), "status_code", None)
+            if status is not None:
+                raise ApiError(
+                    f"API returned {status}",
+                    context={
+                        "blog": blog_name,
+                        "offset": offset,
+                        "status_code": status,
+                    },
+                ) from exc
             raise ApiError(
                 f"API request failed: {exc}",
                 context={"blog": blog_name, "offset": offset},

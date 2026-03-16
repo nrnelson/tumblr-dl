@@ -76,8 +76,8 @@ def _configure_logging(debug: bool) -> None:
     """Configure logging level and format.
 
     Only our package gets DEBUG output. Third-party loggers
-    (urllib3, oauthlib, requests) stay at WARNING to prevent
-    leaking credentials or auth headers.
+    (oauthlib, curl_cffi) stay at WARNING to prevent leaking
+    credentials or auth headers.
     """
     logging.basicConfig(
         level=logging.WARNING,
