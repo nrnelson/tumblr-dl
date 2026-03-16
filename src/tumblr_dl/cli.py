@@ -123,9 +123,10 @@ def _download_blog(
         for post in posts:
             stats.posts_processed += 1
             logger.info(
-                "Processing post %d (ID: %s)...",
+                "Processing post %d (ID: %s, type: %s)...",
                 stats.posts_processed,
                 post.get("id"),
+                post.get("type", "unknown"),
             )
 
             for item in extract_media(post, blog_name):

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any
 
@@ -35,16 +36,27 @@ def extract_media(post: dict[str, Any], blog_name: str) -> list[MediaItem]:
         "photo": _extract_photo,
         "video": _extract_video,
         "audio": _extract_audio,
-        "text": _extract_embedded_images,
-        "answer": _extract_embedded_images,
+        "text": _extract_embedded_media,
+        "answer": _extract_embedded_media,
     }
 
     extractor = extractors.get(post_type)
     if extractor is None:
-        logger.info(
-            "Unhandled post type: %s (post %d)",
+        logger.debug(
+            "Skipping post %d: unhandled type '%s'",
+            post_id,
+            post_type,
+        )
+        return []
+
+    raw = extractor(post)
+    if not raw:
+        body = post.get("body", "")
+        logger.debug(
+            "No media found in %s post %d (body: %s)",
             post_type,
             post_id,
+            body[:500] if body else "<empty>",
         )
         return []
 
@@ -55,7 +67,7 @@ def extract_media(post: dict[str, Any], blog_name: str) -> list[MediaItem]:
             post_id=post_id,
             blog_name=blog_name,
         )
-        for url, media_type in extractor(post)
+        for url, media_type in raw
     ]
 
 
@@ -107,15 +119,37 @@ def _extract_audio(
     return []
 
 
-def _extract_embedded_images(
+def _extract_embedded_media(
     post: dict[str, Any],
 ) -> list[_RawMedia]:
-    """Extract embedded image URLs from text/answer post bodies."""
+    """Extract embedded media from text/answer post bodies.
+
+    Handles:
+    - ``<img src="...">`` tags (images)
+    - ``<figure data-npf='{"type":"video","url":"..."}'>`` tags
+      (reblogged videos stored as NPF JSON attributes)
+    """
     body = post.get("body", "")
     if not body:
         return []
 
     soup = BeautifulSoup(body, "html.parser")
-    return [
-        (img["src"], MediaType.IMAGE) for img in soup.find_all("img") if img.get("src")
-    ]
+    items: list[_RawMedia] = []
+
+    for img in soup.find_all("img"):
+        src = img.get("src")
+        if src:
+            items.append((src, MediaType.IMAGE))
+
+    for figure in soup.find_all("figure", attrs={"data-npf": True}):
+        npf_raw = figure.get("data-npf", "")
+        if not isinstance(npf_raw, str):
+            continue
+        try:
+            npf = json.loads(npf_raw)
+        except json.JSONDecodeError:
+            continue
+        if npf.get("type") == "video" and isinstance(npf.get("url"), str):
+            items.append((npf["url"], MediaType.VIDEO))
+
+    return items

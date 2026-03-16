@@ -113,6 +113,19 @@ def download_item(
         dedup.record(item, dest, DownloadStatus.SUCCESS)
         return DownloadStatus.SUCCESS
 
+    except requests.HTTPError as exc:
+        dedup.record(item, dest, DownloadStatus.FAILED)
+        status_code = exc.response.status_code if exc.response is not None else None
+        raise DownloadError(
+            f"Download failed ({status_code}): {item.url}",
+            context={
+                "url": item.url,
+                "post_id": item.post_id,
+                "blog": item.blog_name,
+                "status_code": status_code,
+            },
+        ) from exc
+
     except requests.RequestException as exc:
         dedup.record(item, dest, DownloadStatus.FAILED)
         raise DownloadError(
