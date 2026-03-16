@@ -21,7 +21,7 @@ A CLI tool for downloading media (images, videos, audio) from Tumblr blogs using
 ## Installation
 
 ```bash
-git clone https://github.com/yourusername/tumblr-dl.git
+git clone https://github.com/nrnelson/tumblr-dl.git
 cd tumblr-dl
 python -m venv .venv
 source .venv/bin/activate

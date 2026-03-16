@@ -19,6 +19,11 @@ dependencies = [
     "pyyaml>=6.0,<7.0",
 ]
 
+[project.urls]
+Homepage = "https://github.com/nrnelson/tumblr-dl"
+Repository = "https://github.com/nrnelson/tumblr-dl"
+Issues = "https://github.com/nrnelson/tumblr-dl/issues"
+
 [project.optional-dependencies]
 dev = [
     "ruff>=0.4",

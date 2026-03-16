@@ -73,12 +73,18 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def _configure_logging(debug: bool) -> None:
-    """Configure logging level and format."""
-    level = logging.DEBUG if debug else logging.INFO
+    """Configure logging level and format.
+
+    Only our package gets DEBUG output. Third-party loggers
+    (urllib3, oauthlib, pytumblr) stay at WARNING to prevent
+    leaking credentials or auth headers.
+    """
     logging.basicConfig(
-        level=level,
+        level=logging.WARNING,
         format="%(levelname)s: %(message)s",
     )
+    pkg_logger = logging.getLogger("tumblr_dl")
+    pkg_logger.setLevel(logging.DEBUG if debug else logging.INFO)
 
 
 def _download_blog(
