@@ -252,41 +252,58 @@ def _extract_npf_blocks(
 ) -> list[_RawMedia]:
     """Extract media from NPF (Neue Post Format) content blocks.
 
-    NPF posts have a ``content`` array of typed blocks. Each block's
-    ``type`` determines how to extract media URLs:
+    NPF posts have a ``content`` array of typed blocks, plus a ``trail``
+    array of reblog entries each with their own ``content`` blocks.
+    Both are scanned for media. Each block's ``type`` determines how
+    to extract media URLs:
     - ``image``: ``media`` array with ``url`` entries (pick largest).
     - ``video``: ``media`` object with ``url``, or top-level ``url``.
     - ``audio``: ``media`` object with ``url``, or top-level ``url``.
     """
+    # Collect all content block arrays: the post's own + each trail entry's.
+    all_blocks: list[dict[str, Any]] = []
+
     content = post.get("content")
-    if not isinstance(content, list):
-        return []
+    if isinstance(content, list):
+        all_blocks.extend(b for b in content if isinstance(b, dict))
+
+    trail = post.get("trail", [])
+    if isinstance(trail, list):
+        for entry in trail:
+            if isinstance(entry, dict):
+                trail_content = entry.get("content")
+                if isinstance(trail_content, list):
+                    all_blocks.extend(b for b in trail_content if isinstance(b, dict))
 
     items: list[_RawMedia] = []
-    for block in content:
-        if not isinstance(block, dict):
-            continue
+    seen_urls: set[str] = set()
 
+    for block in all_blocks:
         block_type = block.get("type")
+        url: str | None = None
+        media_type: MediaType | None = None
 
         if block_type == "image":
             media_list = block.get("media")
             if isinstance(media_list, list) and media_list:
                 # Pick the largest (first entry is typically original size).
                 best = media_list[0]
-                url = best.get("url")
-                if isinstance(url, str) and url:
-                    items.append((url, MediaType.IMAGE))
+                raw_url = best.get("url")
+                if isinstance(raw_url, str) and raw_url:
+                    url = raw_url
+                    media_type = MediaType.IMAGE
 
         elif block_type == "video":
             url = _npf_media_url(block)
-            if url:
-                items.append((url, MediaType.VIDEO))
+            media_type = MediaType.VIDEO
 
         elif block_type == "audio":
             url = _npf_media_url(block)
-            if url:
-                items.append((url, MediaType.AUDIO))
+            media_type = MediaType.AUDIO
+
+        if url and media_type and url not in seen_urls:
+            seen_urls.add(url)
+            items.append((url, media_type))
 
     return items
 
