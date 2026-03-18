@@ -110,6 +110,14 @@ class DownloadTracker:
             await self._conn.executescript(_SCHEMA_SQL)
             await self._conn.execute(f"PRAGMA user_version={_SCHEMA_VERSION}")
             await self._conn.commit()
+        elif version < _SCHEMA_VERSION:
+            msg = (
+                f"Database schema v{version} is older than required "
+                f"v{_SCHEMA_VERSION}. Please delete the database and "
+                f"re-download, or wait for a future release with "
+                f"migration support."
+            )
+            raise RuntimeError(msg)
         elif version > _SCHEMA_VERSION:
             msg = (
                 f"Database schema v{version} is newer than supported "

@@ -722,6 +722,50 @@ def _resolve_logging_settings(
     return debug, log_file
 
 
+async def _process_blog_list(
+    client: TumblrClient,
+    blog_names: list[str],
+    app_config: AppConfig | None,
+    overrides: dict[str, Any],
+    total_stats: DownloadStats,
+) -> None:
+    """Download media from a list of blogs, merging stats into *total_stats*."""
+    for i, blog_name in enumerate(blog_names):
+        blog_config = resolve_blog_config(blog_name, app_config, overrides)
+
+        if len(blog_names) > 1:
+            logger.info(
+                "--- Blog %d/%d: %s ---",
+                i + 1,
+                len(blog_names),
+                blog_name,
+            )
+        logger.info(
+            "Starting download from %s to %s",
+            blog_name,
+            blog_config.output_dir,
+        )
+
+        tracker, dedup = await _setup_tracker_and_dedup(blog_config)
+        try:
+            blog_stats = await _run_blog_download(
+                client, blog_name, blog_config, tracker, dedup
+            )
+        finally:
+            if tracker:
+                await tracker.close()
+
+        if len(blog_names) > 1:
+            logger.info(
+                "  %s: %d posts, %d downloaded",
+                blog_name,
+                blog_stats.posts_processed,
+                sum(blog_stats.downloaded.values()),
+            )
+
+        _merge_stats(total_stats, blog_stats)
+
+
 async def _run(args: argparse.Namespace) -> int:
     """Execute the download workflow. Returns exit code."""
     # Load .env file if present.
@@ -759,43 +803,9 @@ async def _run(args: argparse.Namespace) -> int:
             async with TumblrClient(auth) as client:
                 total_stats = DownloadStats()
                 blog_names = list(app_config.blogs.keys())
-
-                for i, blog_name in enumerate(blog_names):
-                    blog_config = resolve_blog_config(blog_name, app_config, overrides)
-
-                    if len(blog_names) > 1:
-                        logger.info(
-                            "--- Blog %d/%d: %s ---",
-                            i + 1,
-                            len(blog_names),
-                            blog_name,
-                        )
-
-                    logger.info(
-                        "Starting download from %s to %s",
-                        blog_name,
-                        blog_config.output_dir,
-                    )
-
-                    tracker, dedup = await _setup_tracker_and_dedup(blog_config)
-                    try:
-                        blog_stats = await _run_blog_download(
-                            client, blog_name, blog_config, tracker, dedup
-                        )
-                    finally:
-                        if tracker:
-                            await tracker.close()
-
-                    if len(blog_names) > 1:
-                        logger.info(
-                            "  %s: %d posts, %d downloaded",
-                            blog_name,
-                            blog_stats.posts_processed,
-                            sum(blog_stats.downloaded.values()),
-                        )
-
-                    _merge_stats(total_stats, blog_stats)
-
+                await _process_blog_list(
+                    client, blog_names, app_config, overrides, total_stats
+                )
                 total_stats.api_calls = client.api_calls
                 total_stats.rate_limit = client.rate_limit
 
@@ -814,7 +824,11 @@ async def _run(args: argparse.Namespace) -> int:
 
     # Ad-hoc mode: blog names from CLI.
     blog_names_cli: list[str] = args.blog_names or []
-    tag = overrides.get("tag") or (app_config.defaults.tag if app_config else None)
+    tag: str | None = (
+        str(overrides["tag"])
+        if overrides.get("tag")
+        else (app_config.defaults.tag if app_config else None)
+    )
 
     if not tag and not blog_names_cli:
         logger.error("At least one blog_name is required unless --tag is specified.")
@@ -856,7 +870,7 @@ async def _run(args: argparse.Namespace) -> int:
                     )
                     total_stats = await _download_tagged(
                         client=client,
-                        tag=str(tag),
+                        tag=tag,
                         output_dir=output_dir,
                         dedup=dedup,
                         tracker=tracker,
@@ -869,40 +883,9 @@ async def _run(args: argparse.Namespace) -> int:
                         await tracker.close()
             else:
                 # Ad-hoc blog mode: per-blog tracker/dedup to match --sync.
-                for i, blog_name in enumerate(blog_names_cli):
-                    blog_config = resolve_blog_config(blog_name, app_config, overrides)
-
-                    if len(blog_names_cli) > 1:
-                        logger.info(
-                            "--- Blog %d/%d: %s ---",
-                            i + 1,
-                            len(blog_names_cli),
-                            blog_name,
-                        )
-                    logger.info(
-                        "Starting download from %s to %s",
-                        blog_name,
-                        blog_config.output_dir,
-                    )
-
-                    tracker, dedup = await _setup_tracker_and_dedup(blog_config)
-                    try:
-                        blog_stats = await _run_blog_download(
-                            client, blog_name, blog_config, tracker, dedup
-                        )
-                    finally:
-                        if tracker:
-                            await tracker.close()
-
-                    if len(blog_names_cli) > 1:
-                        logger.info(
-                            "  %s: %d posts, %d downloaded",
-                            blog_name,
-                            blog_stats.posts_processed,
-                            sum(blog_stats.downloaded.values()),
-                        )
-
-                    _merge_stats(total_stats, blog_stats)
+                await _process_blog_list(
+                    client, blog_names_cli, app_config, overrides, total_stats
+                )
 
             total_stats.api_calls = client.api_calls
             total_stats.rate_limit = client.rate_limit

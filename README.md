@@ -13,7 +13,7 @@ A CLI tool for downloading media (images, videos, audio) from Tumblr blogs using
 - **Tag exclusion** — skip posts matching glob patterns (e.g. `--exclude-tags "gore*,explicit"`)
 - Extracts embedded images from text and answer posts
 - Extracts video URLs from embedded iframes and NPF data attributes
-- Fully async architecture for concurrent I/O
+- Fully async architecture for non-blocking I/O
 - **Incremental sync** — tracks progress in SQLite; only fetches new posts on subsequent runs
 - Skips already-downloaded files (duplicate detection via DB + filesystem)
 - Resumable — start from any post offset
@@ -278,6 +278,7 @@ tumblr-dl --tag photography --exclude-tags "ai*,generated" --exclude-blogs "spam
 | `0` | Success |
 | `2` | Configuration error (missing credentials or invalid config) |
 | `3` | Runtime error (API failure) |
+| `130` | Interrupted (Ctrl-C) |
 
 ## Supported Post Types
 
