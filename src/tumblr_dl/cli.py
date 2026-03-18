@@ -347,6 +347,7 @@ async def _download_blog(
         max_posts: Stop after processing this many posts.
         full_scan: If True, ignore stored cursor.
         exclude_patterns: Tag glob patterns to skip.
+        exclude_blog_patterns: Glob patterns to skip by reblog source blog.
 
     Returns:
         Accumulated download statistics.
@@ -385,9 +386,9 @@ async def _download_blog(
             post_ts: int = post.get("timestamp", 0)
 
             # Early termination: post already seen on a previous run.
-            id_seen = highest_known_id and post_id <= highest_known_id
-            ts_seen = last_known_ts == 0 or post_ts <= last_known_ts
-            if id_seen and ts_seen:
+            id_at_or_below_cursor = highest_known_id and post_id <= highest_known_id
+            ts_not_newer = last_known_ts == 0 or post_ts <= last_known_ts
+            if id_at_or_below_cursor and ts_not_newer:
                 logger.info(
                     "Reached previously seen post %d (cursor: %d, ts: %d). Stopping.",
                     post_id,
@@ -513,6 +514,7 @@ async def _download_tagged(
         tracker: Optional SQLite tracker for metadata storage.
         max_posts: Stop after processing this many posts.
         exclude_patterns: Tag glob patterns to skip.
+        exclude_blog_patterns: Glob patterns to skip by reblog source blog.
 
     Returns:
         Accumulated download statistics.
@@ -635,6 +637,17 @@ async def _run_blog_download(
     dedup: DedupStrategy,
 ) -> DownloadStats:
     """Run a single blog download using resolved BlogConfig."""
+    logger.debug(
+        "Effective config for %s: output_dir=%s max_posts=%s full_scan=%s "
+        "no_db=%s exclude_tags=%s exclude_blogs=%s",
+        blog_name,
+        blog_config.output_dir,
+        blog_config.max_posts,
+        blog_config.full_scan,
+        blog_config.no_db,
+        blog_config.exclude_tags,
+        blog_config.exclude_blogs,
+    )
     output_dir = Path(blog_config.output_dir).expanduser()
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -778,7 +791,7 @@ async def _run(args: argparse.Namespace) -> int:
                     _merge_stats(total_stats, blog_stats)
 
                 total_stats.api_calls = client.api_calls
-                total_stats.rate_limit = client._rate_limit
+                total_stats.rate_limit = client.rate_limit
 
         except ConfigError as exc:
             logger.error("%s", exc)
@@ -878,7 +891,7 @@ async def _run(args: argparse.Namespace) -> int:
                     _merge_stats(total_stats, blog_stats)
 
             total_stats.api_calls = client.api_calls
-            total_stats.rate_limit = client._rate_limit
+            total_stats.rate_limit = client.rate_limit
 
     except ConfigError as exc:
         logger.error("%s", exc)

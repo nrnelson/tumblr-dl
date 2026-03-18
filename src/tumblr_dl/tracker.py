@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import shutil
 from pathlib import Path
 from typing import Any
 
@@ -13,9 +12,9 @@ from tumblr_dl.models import BlogState, PostMetadata
 
 logger = logging.getLogger(__name__)
 
-_SCHEMA_VERSION = 2
+_SCHEMA_VERSION = 1
 
-# Full schema for fresh databases (version 0 → 2).
+# Full schema for fresh databases.
 _SCHEMA_SQL = """\
 CREATE TABLE IF NOT EXISTS blog_state (
     blog_name        TEXT PRIMARY KEY,
@@ -79,46 +78,6 @@ CREATE TABLE IF NOT EXISTS skipped_posts (
 );
 """
 
-# Migration from v1 → v2: add new columns and tables.
-_MIGRATE_V1_TO_V2_SQL = """\
-ALTER TABLE downloads ADD COLUMN post_url TEXT;
-ALTER TABLE downloads ADD COLUMN post_timestamp INTEGER;
-ALTER TABLE downloads ADD COLUMN original_post_timestamp INTEGER;
-ALTER TABLE downloads ADD COLUMN content_labels TEXT;
-
-CREATE TABLE IF NOT EXISTS post_tags (
-    blog_name  TEXT NOT NULL,
-    post_id    INTEGER NOT NULL,
-    tag        TEXT NOT NULL,
-    PRIMARY KEY (blog_name, post_id, tag)
-);
-
-CREATE INDEX IF NOT EXISTS idx_post_tags_tag ON post_tags(tag);
-
-CREATE TABLE IF NOT EXISTS reblog_trail (
-    id               INTEGER PRIMARY KEY AUTOINCREMENT,
-    blog_name        TEXT NOT NULL,
-    post_id          INTEGER NOT NULL,
-    position         INTEGER NOT NULL,
-    trail_blog_name  TEXT,
-    trail_post_id    INTEGER,
-    trail_timestamp  INTEGER,
-    is_root          INTEGER NOT NULL DEFAULT 0,
-    UNIQUE(blog_name, post_id, position)
-);
-
-CREATE INDEX IF NOT EXISTS idx_trail_blog ON reblog_trail(trail_blog_name);
-
-CREATE TABLE IF NOT EXISTS skipped_posts (
-    blog_name    TEXT NOT NULL,
-    post_id      INTEGER NOT NULL,
-    skip_reason  TEXT NOT NULL,
-    matched_tag  TEXT,
-    skipped_at   TEXT NOT NULL DEFAULT (datetime('now')),
-    PRIMARY KEY (blog_name, post_id)
-);
-"""
-
 
 class DownloadTracker:
     """Async SQLite tracker for blog state and download records.
@@ -148,49 +107,13 @@ class DownloadTracker:
         version = row[0] if row else 0
 
         if version == 0:
-            # Fresh database — create full v2 schema.
             await self._conn.executescript(_SCHEMA_SQL)
             await self._conn.execute(f"PRAGMA user_version={_SCHEMA_VERSION}")
             await self._conn.commit()
-        elif version < _SCHEMA_VERSION:
-            await self._migrate_v1_to_v2()
 
         logger.debug(
             "Opened tracker database: %s (schema v%d)", self._db_path, _SCHEMA_VERSION
         )
-
-    async def _migrate_v1_to_v2(self) -> None:
-        """Migrate from schema v1 to v2.
-
-        Backs up the database file, then adds new columns and tables.
-        Existing download records are preserved with NULL for new columns.
-        If migration fails, the backup is automatically restored.
-        """
-        conn = self._ensure_conn()
-
-        # Backup the old database before migrating.
-        backup_path = self._db_path.with_suffix(".db.v1.bak")
-        logger.info("Backing up database to %s before migration...", backup_path)
-        # Close temporarily to ensure a clean backup.
-        await conn.close()
-        shutil.copy2(self._db_path, backup_path)
-        self._conn = await aiosqlite.connect(self._db_path)
-        await self._conn.execute("PRAGMA journal_mode=WAL")
-        conn = self._conn
-
-        try:
-            logger.info("Migrating database schema from v1 to v2...")
-            await conn.executescript(_MIGRATE_V1_TO_V2_SQL)
-            await conn.execute(f"PRAGMA user_version={_SCHEMA_VERSION}")
-            await conn.commit()
-            logger.info("Migration complete. Backup at %s", backup_path)
-        except Exception:
-            logger.error("Migration failed. Restoring backup from %s...", backup_path)
-            await conn.close()
-            shutil.copy2(backup_path, self._db_path)
-            self._conn = await aiosqlite.connect(self._db_path)
-            await self._conn.execute("PRAGMA journal_mode=WAL")
-            raise
 
     async def close(self) -> None:
         """Flush pending writes and close the database connection."""
@@ -340,6 +263,13 @@ class DownloadTracker:
             content_labels: Comma-separated content labels.
         """
         conn = self._ensure_conn()
+        logger.debug(
+            "Recording download: blog=%s post=%d url=%s status=%s",
+            blog_name,
+            post_id,
+            url,
+            status,
+        )
         await conn.execute(
             "INSERT OR REPLACE INTO downloads "
             "(blog_name, post_id, url, file_path, media_type, "
@@ -397,31 +327,41 @@ class DownloadTracker:
             metadata: Extracted post metadata to persist.
         """
         conn = self._ensure_conn()
+        logger.debug(
+            "Recording metadata: post=%d blog=%s tags=%d trail=%d",
+            metadata.post_id,
+            metadata.blog_name,
+            len(metadata.tags),
+            len(metadata.trail),
+        )
 
         # Insert tags (normalized to lowercase by the extractor).
-        for tag in metadata.tags:
-            await conn.execute(
+        if metadata.tags:
+            await conn.executemany(
                 "INSERT OR IGNORE INTO post_tags (blog_name, post_id, tag) "
                 "VALUES (?, ?, ?)",
-                (metadata.blog_name, metadata.post_id, tag),
+                [(metadata.blog_name, metadata.post_id, tag) for tag in metadata.tags],
             )
 
         # Insert reblog trail entries.
-        for entry in metadata.trail:
-            await conn.execute(
+        if metadata.trail:
+            await conn.executemany(
                 "INSERT OR IGNORE INTO reblog_trail "
                 "(blog_name, post_id, position, trail_blog_name, "
                 "trail_post_id, trail_timestamp, is_root) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (
-                    metadata.blog_name,
-                    metadata.post_id,
-                    entry.position,
-                    entry.blog_name,
-                    entry.post_id,
-                    entry.timestamp,
-                    1 if entry.is_root else 0,
-                ),
+                [
+                    (
+                        metadata.blog_name,
+                        metadata.post_id,
+                        entry.position,
+                        entry.blog_name,
+                        entry.post_id,
+                        entry.timestamp,
+                        1 if entry.is_root else 0,
+                    )
+                    for entry in metadata.trail
+                ],
             )
 
     # --- Skipped posts ---
@@ -442,6 +382,12 @@ class DownloadTracker:
             matched_tag: The tag that triggered the exclusion.
         """
         conn = self._ensure_conn()
+        logger.debug(
+            "Recording skipped post: post=%d blog=%s reason=%s",
+            post_id,
+            blog_name,
+            skip_reason,
+        )
         await conn.execute(
             "INSERT OR REPLACE INTO skipped_posts "
             "(blog_name, post_id, skip_reason, matched_tag, skipped_at) "

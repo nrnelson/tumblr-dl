@@ -71,6 +71,11 @@ class TumblrClient:
         self._rate_limit = rate_limit
         self.api_calls: int = 0
 
+    @property
+    def rate_limit(self) -> int:
+        """Maximum API calls per minute."""
+        return self._rate_limit
+
     async def __aenter__(self) -> TumblrClient:
         return self
 
@@ -118,6 +123,7 @@ class TumblrClient:
         for attempt in range(_RETRY_MAX_ATTEMPTS):
             await self._limiter.acquire()
 
+            logger.debug("API request: %s (attempt %d)", url, attempt + 1)
             try:
                 signed_url, headers = self._sign_url(url)
                 response = await self._session.get(
@@ -145,6 +151,7 @@ class TumblrClient:
                 continue
 
             self.api_calls += 1
+            logger.debug("API response: %d", response.status_code)
 
             if response.status_code == 429 or response.status_code >= 500:
                 delay = min(
@@ -207,7 +214,7 @@ class TumblrClient:
         try:
             data = await self._request_with_retry(url, error_context=ctx)
         except ApiError:
-            raise
+            raise  # Don't re-wrap ApiError in another ApiError.
         except Exception as exc:
             raise ApiError(
                 f"API request failed: {exc}",
@@ -253,7 +260,7 @@ class TumblrClient:
         try:
             data = await self._request_with_retry(url, error_context=ctx)
         except ApiError:
-            raise
+            raise  # Don't re-wrap ApiError in another ApiError.
         except Exception as exc:
             raise ApiError(
                 f"API request failed: {exc}",

@@ -305,3 +305,12 @@ def test_extract_text_with_embedded_images(
     items = extract_media(sample_text_post_with_images, "testblog")
     assert len(items) == 1
     assert items[0].media_type is MediaType.IMAGE
+
+
+def test_extract_answer_with_embedded_images(
+    sample_answer_post_with_images: dict[str, Any],
+) -> None:
+    """Answer post embedded image extraction works."""
+    items = extract_media(sample_answer_post_with_images, "testblog")
+    assert len(items) == 1
+    assert items[0].media_type is MediaType.IMAGE

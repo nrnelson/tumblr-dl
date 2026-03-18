@@ -63,7 +63,12 @@ To obtain credentials:
 
 ### Config File
 
-Create `~/.config/tumblr-dl/config.toml` (or set `XDG_CONFIG_HOME`):
+Create `~/.config/tumblr-dl/config.toml` (or set `XDG_CONFIG_HOME`).
+Since this file contains OAuth secrets, restrict its permissions:
+
+```bash
+chmod 600 ~/.config/tumblr-dl/config.toml
+```
 
 ```toml
 [auth]
@@ -383,6 +388,7 @@ src/tumblr_dl/
 ├── exceptions.py      — TumblrDlError hierarchy
 ├── extractors.py      — media URL extraction per post type
 ├── models.py          — enums (DownloadStatus, MediaType) + dataclasses
+├── ratelimit.py       — async token bucket rate limiter
 ├── tracker.py         — SQLite-based download tracker for incremental sync
 └── utils.py           — sanitize_filename
 ```

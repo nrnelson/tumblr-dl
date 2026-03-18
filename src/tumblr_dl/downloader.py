@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 _USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/131.0.0.0 Safari/537.36"
+    "Chrome/146.0.0.0 Safari/537.36"
 )
 
 
@@ -147,7 +147,11 @@ async def _async_download(url: str, dest: Path, blog_name: str) -> None:
             context={"url": url, "content_type": content_type},
         )
 
+    # Loads full response into memory; curl_cffi async doesn't support streaming.
     data = response.content
+    logger.debug(
+        "Downloaded %d bytes (content-type: %s): %s", len(data), content_type, url
+    )
     if not data:
         raise DownloadError(
             f"Downloaded file is empty (0 bytes): {url}",
