@@ -6,8 +6,10 @@ import argparse
 import asyncio
 import fnmatch
 import logging
+import os
 import sys
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -132,24 +134,78 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--debug",
         action="store_true",
-        help="Enable debug logging",
+        help="Enable debug logging (also writes a log file)",
+    )
+    parser.add_argument(
+        "--log-file",
+        default=None,
+        help="Write logs to this file (implies debug-level file logging)",
     )
     return parser
 
 
-def _configure_logging(debug: bool) -> None:
-    """Configure logging level and format.
+def _resolve_log_dir() -> Path:
+    """Return the XDG-compliant log directory.
 
-    Only our package gets DEBUG output. Third-party loggers
-    (oauthlib, curl_cffi) stay at WARNING to prevent leaking
-    credentials or auth headers.
+    Uses ``$XDG_STATE_HOME/tumblr-dl/logs/`` (defaults to
+    ``~/.local/state/tumblr-dl/logs/``).
     """
-    logging.basicConfig(
-        level=logging.WARNING,
-        format="%(levelname)s: %(message)s",
-    )
+    xdg = os.environ.get("XDG_STATE_HOME", "")
+    base = Path(xdg) if xdg else Path.home() / ".local" / "state"
+    return base / "tumblr-dl" / "logs"
+
+
+def _configure_logging(debug: bool, log_file: str | None = None) -> Path | None:
+    """Configure logging level, format, and optional file handler.
+
+    Console always logs at INFO (or DEBUG with ``--debug``).
+    When a log file is active, it always captures DEBUG-level output.
+
+    Third-party loggers (oauthlib, curl_cffi) stay at WARNING in all
+    handlers to prevent leaking credentials or auth headers.
+
+    Args:
+        debug: If True, set console to DEBUG and auto-create a log file.
+        log_file: Explicit log file path. Overrides the auto-generated path.
+
+    Returns:
+        Path to the log file if one was created, None otherwise.
+    """
+    # Console handler — stderr.
+    console = logging.StreamHandler()
+    console.setLevel(logging.DEBUG if debug else logging.INFO)
+    console.setFormatter(logging.Formatter("%(levelname)s: %(message)s"))
+
+    # Root logger: WARNING floor keeps third-party libs quiet.
+    root = logging.getLogger()
+    root.setLevel(logging.WARNING)
+    root.addHandler(console)
+
+    # Our package logger.
     pkg_logger = logging.getLogger("tumblr_dl")
     pkg_logger.setLevel(logging.DEBUG if debug else logging.INFO)
+
+    # Determine log file path.
+    log_path: Path | None = None
+    if log_file:
+        log_path = Path(log_file)
+    elif debug:
+        log_dir = _resolve_log_dir()
+        log_dir.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now(tz=UTC).strftime("%Y%m%d-%H%M%S")
+        log_path = log_dir / f"tumblr-dl-{stamp}.log"
+
+    if log_path:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        file_handler = logging.FileHandler(log_path, encoding="utf-8")
+        file_handler.setLevel(logging.DEBUG)
+        file_handler.setFormatter(
+            logging.Formatter("%(asctime)s %(levelname)s [%(name)s] %(message)s")
+        )
+        pkg_logger.addHandler(file_handler)
+        pkg_logger.info("Log file: %s", log_path)
+
+    return log_path
 
 
 def _parse_exclude_patterns(raw: str | list[str] | None) -> list[str]:
@@ -624,7 +680,7 @@ async def _setup_tracker_and_dedup(
 
 async def _run(args: argparse.Namespace) -> int:
     """Execute the download workflow. Returns exit code."""
-    _configure_logging(args.debug)
+    _configure_logging(args.debug, log_file=args.log_file)
 
     # Load .env file if present.
     load_dotenv()

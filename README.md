@@ -6,7 +6,7 @@ A CLI tool for downloading media (images, videos, audio) from Tumblr blogs using
 
 - Downloads images, videos, and audio from any Tumblr blog
 - **TOML config file** — define blogs, exclusions, and defaults in `~/.config/tumblr-dl/config.toml`
-- **`sync` command** — download all configured blogs in one shot
+- **`--sync` flag** — download all configured blogs in one shot
 - **Tag-based search** — search and download from any Tumblr tag (e.g. `--tag landscape`)
 - **Rich metadata capture** — stores post URLs, tags, reblog trails, content labels, and timestamps in SQLite
 - **Reblog trail tracking** — captures the full reblog chain from original poster to current reblogger
@@ -120,7 +120,7 @@ tumblr-dl <blog_name> [blog_name ...] [options]
 ### Sync all configured blogs
 
 ```bash
-tumblr-dl sync
+tumblr-dl --sync
 ```
 
 Runs all `[blog.*]` sections from your config file. CLI flags override config values.
@@ -146,7 +146,9 @@ Runs all `[blog.*]` sections from your config file. CLI flags override config va
 | `--tag TAG` | off | Search Tumblr by tag instead of downloading a specific blog |
 | `--exclude-tags PATTERNS` | off | Comma-separated glob patterns to exclude (e.g. `nsfw,explicit*`) |
 | `--exclude-blogs PATTERNS` | off | Comma-separated glob patterns of blog names to skip in reblog trails |
-| `--debug` | off | Enable debug logging |
+| `--sync` | off | Download all blogs defined in the TOML config file |
+| `--debug` | off | Enable debug logging and write a log file |
+| `--log-file PATH` | off | Write debug-level logs to a specific file |
 
 CLI flags override values from the config file when explicitly provided.
 
@@ -170,22 +172,23 @@ Download to a custom directory:
 tumblr-dl myblog -o ~/media/myblog
 ```
 
-Download the first 100 posts with debug output:
+Download the first 100 posts with debug output (log file auto-created):
 
 ```bash
 tumblr-dl myblog --max-posts 100 --debug
+# Log written to ~/.local/state/tumblr-dl/logs/tumblr-dl-YYYYMMDD-HHMMSS.log
 ```
 
 Sync all configured blogs from config.toml:
 
 ```bash
-tumblr-dl sync
+tumblr-dl --sync
 ```
 
 Sync with a CLI override:
 
 ```bash
-tumblr-dl sync --max-posts 50
+tumblr-dl --sync --max-posts 50
 ```
 
 Re-run and only fetch new posts (automatic — just run the same command again):
