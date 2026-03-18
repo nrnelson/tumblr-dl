@@ -17,6 +17,7 @@ from dotenv import load_dotenv
 from tumblr_dl.client import TumblrClient
 from tumblr_dl.config import (
     AppConfig,
+    AppSettings,
     BlogConfig,
     load_auth,
     load_toml_config,
@@ -678,18 +679,35 @@ async def _setup_tracker_and_dedup(
     return tracker, SqliteDedup(tracker)
 
 
+def _resolve_logging_settings(
+    args: argparse.Namespace, settings: AppSettings
+) -> tuple[bool, str | None]:
+    """Merge logging settings from TOML config and CLI flags.
+
+    CLI flags override config values.
+
+    Returns:
+        Tuple of (debug, log_file).
+    """
+    debug = settings.debug or args.debug
+    log_file = args.log_file if args.log_file is not None else settings.log_file
+    return debug, log_file
+
+
 async def _run(args: argparse.Namespace) -> int:
     """Execute the download workflow. Returns exit code."""
-    _configure_logging(args.debug, log_file=args.log_file)
-
     # Load .env file if present.
     load_dotenv()
 
-    # Load TOML config.
+    # Load TOML config first so [settings] can inform logging.
     config_path = Path(args.config) if args.config else resolve_config_path()
     app_config: AppConfig | None = None
     if config_path:
         app_config = load_toml_config(config_path)
+
+    settings = app_config.settings if app_config else AppSettings()
+    debug, log_file = _resolve_logging_settings(args, settings)
+    _configure_logging(debug, log_file=log_file)
 
     overrides = _cli_overrides(args)
 

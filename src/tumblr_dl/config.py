@@ -48,10 +48,19 @@ class BlogConfig:
 
 
 @dataclass
+class AppSettings:
+    """App-level settings from the TOML ``[settings]`` section."""
+
+    debug: bool = False
+    log_file: str | None = None
+
+
+@dataclass
 class AppConfig:
     """Top-level application configuration from TOML."""
 
     auth: AuthCredentials | None = None
+    settings: AppSettings = field(default_factory=AppSettings)
     defaults: BlogConfig = field(default_factory=BlogConfig)
     blogs: dict[str, BlogConfig] = field(default_factory=dict)
 
@@ -145,6 +154,29 @@ def _parse_blog_config(data: dict[str, object]) -> BlogConfig:
     return config
 
 
+def _parse_app_settings(data: dict[str, object]) -> AppSettings:
+    """Parse a TOML ``[settings]`` table into an AppSettings."""
+    settings = AppSettings()
+    for key, value in data.items():
+        if key == "debug":
+            if not isinstance(value, bool):
+                raise ConfigError(
+                    f"Config key 'settings.{key}' must be a boolean, "
+                    f"got {type(value).__name__}",
+                    context={"key": key, "value": value},
+                )
+            settings.debug = value
+        elif key == "log_file":
+            if not isinstance(value, str):
+                raise ConfigError(
+                    f"Config key 'settings.{key}' must be a string, "
+                    f"got {type(value).__name__}",
+                    context={"key": key, "value": value},
+                )
+            settings.log_file = value
+    return settings
+
+
 def load_toml_config(path: Path) -> AppConfig:
     """Parse and validate a TOML config file.
 
@@ -195,6 +227,11 @@ def load_toml_config(path: Path) -> AppConfig:
                 oauth_token=str(auth_data["oauth_token"]),
                 oauth_token_secret=str(auth_data["oauth_token_secret"]),
             )
+
+    # Parse [settings] section.
+    settings_data = data.get("settings")
+    if isinstance(settings_data, dict):
+        app.settings = _parse_app_settings(settings_data)
 
     # Parse [defaults] section.
     defaults_data = data.get("defaults")

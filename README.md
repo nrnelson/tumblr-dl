@@ -72,6 +72,11 @@ consumer_secret = "your_consumer_secret"
 oauth_token = "your_oauth_token"
 oauth_token_secret = "your_oauth_token_secret"
 
+# App-level settings
+[settings]
+debug = true                    # enable debug logging + auto log file
+# log_file = "~/logs/tumblr-dl.log"  # optional: explicit log file path
+
 # Global defaults — apply to all blogs unless overridden
 [defaults]
 output_dir = "tumblr_downloads"
@@ -108,6 +113,13 @@ All per-blog keys are optional and inherit from `[defaults]`:
 | `retry_failed` | boolean | Re-download failed items |
 | `no_db` | boolean | Disable SQLite tracking |
 | `db_path` | string | Custom SQLite database path |
+
+The `[settings]` section controls app-level behavior:
+
+| Key | Type | Description |
+|-----|------|-------------|
+| `debug` | boolean | Enable debug logging and auto-create a log file |
+| `log_file` | string | Write debug-level logs to a specific file |
 
 ## Usage
 
