@@ -21,17 +21,6 @@ _USER_AGENT = (
     "Chrome/91.0.4472.124 Safari/537.36"
 )
 
-# Shared session for all downloads within a process.
-_session: AsyncSession | None = None  # type: ignore[type-arg]
-
-
-def _get_session() -> AsyncSession:  # type: ignore[type-arg]
-    """Return the shared download session, creating it if needed."""
-    global _session  # noqa: PLW0603
-    if _session is None:
-        _session = AsyncSession()
-    return _session
-
 
 class DedupStrategy(abc.ABC):
     """Interface for duplicate detection.
@@ -135,23 +124,40 @@ def _resolve_path(item: MediaItem, output_dir: Path) -> Path:
 async def _async_download(url: str, dest: Path, blog_name: str) -> None:
     """Download a file using native async HTTP.
 
+    Uses a fresh session per request to avoid curl_cffi connection-pool
+    issues (stale keep-alive connections cause IncompleteRead / ConnectionError
+    on Tumblr's CDN).
+
     Writes to a temporary file first, then renames on success.
-    This prevents 0-byte files from being left behind on failure.
     """
     headers = {
         "User-Agent": _USER_AGENT,
         "Referer": f"https://{blog_name}.tumblr.com/",
     }
-    session = _get_session()
-    response = await session.get(url, headers=headers, stream=True, timeout=30)
+    # Fresh session per download — curl_cffi's shared session reuses
+    # keep-alive connections that Tumblr's CDN resets mid-transfer.
+    async with AsyncSession() as session:
+        response = await session.get(url, headers=headers, timeout=(30, 300))
     response.raise_for_status()
+
+    # Reject HTML error pages served with 200 status
+    content_type = response.headers.get("content-type", "")
+    if "text/html" in content_type:
+        raise DownloadError(
+            f"Server returned HTML instead of media: {url}",
+            context={"url": url, "content_type": content_type},
+        )
+
+    data = response.content
+    if not data:
+        raise DownloadError(
+            f"Downloaded file is empty (0 bytes): {url}",
+            context={"url": url},
+        )
 
     tmp = dest.with_suffix(dest.suffix + ".part")
     try:
-        with tmp.open("wb") as fh:
-            async for chunk in response.aiter_content():
-                if chunk:
-                    fh.write(chunk)
+        tmp.write_bytes(data)
         tmp.rename(dest)
     except BaseException:
         tmp.unlink(missing_ok=True)
@@ -190,24 +196,31 @@ async def download_item(
         await dedup.record(item, dest, DownloadStatus.SUCCESS)
         return DownloadStatus.SUCCESS
 
+    except DownloadError:
+        await dedup.record(item, dest, DownloadStatus.FAILED)
+        raise
+
     except Exception as exc:
         await dedup.record(item, dest, DownloadStatus.FAILED)
         status_code = getattr(getattr(exc, "response", None), "status_code", None)
+        exc_type = type(exc).__name__
         if status_code is not None:
             raise DownloadError(
-                f"Download failed ({status_code}): {item.url}",
+                f"Download failed ({exc_type}, HTTP {status_code}): {item.url}",
                 context={
                     "url": item.url,
                     "post_id": item.post_id,
                     "blog": item.blog_name,
                     "status_code": status_code,
+                    "error_type": exc_type,
                 },
             ) from exc
         raise DownloadError(
-            f"Download failed: {item.url}",
+            f"Download failed ({exc_type}): {item.url}",
             context={
                 "url": item.url,
                 "post_id": item.post_id,
                 "blog": item.blog_name,
+                "error_type": exc_type,
             },
         ) from exc

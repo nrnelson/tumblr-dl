@@ -135,7 +135,7 @@ async def test_download_item_http_error(tmp_path: Path) -> None:
             new_callable=AsyncMock,
             side_effect=error,
         ),
-        pytest.raises(DownloadError, match="Download failed \\(404\\)") as exc_info,
+        pytest.raises(DownloadError, match=r"Download failed \(Exception, HTTP 404\)") as exc_info,
     ):
         await download_item(item, tmp_path, dedup)
 
@@ -158,7 +158,7 @@ async def test_download_item_network_error(tmp_path: Path) -> None:
             new_callable=AsyncMock,
             side_effect=ConnectionError("timeout"),
         ),
-        pytest.raises(DownloadError, match="Download failed:") as exc_info,
+        pytest.raises(DownloadError, match=r"Download failed \(ConnectionError\)") as exc_info,
     ):
         await download_item(item, tmp_path, dedup)
 
