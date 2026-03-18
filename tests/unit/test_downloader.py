@@ -34,20 +34,21 @@ def _make_item(
 
 
 def test_resolve_path_extracts_filename(tmp_path: Path) -> None:
-    """Path is derived from URL basename, placed in output dir."""
-    item = _make_item(url="https://cdn.example.com/abc123/photo.jpg")
+    """Path is derived from URL basename with post_id prefix, placed in output dir."""
+    item = _make_item(url="https://cdn.example.com/abc123/photo.jpg", post_id=123)
     result = _resolve_path(item, tmp_path)
 
-    assert result == tmp_path / "photo.jpg"
+    assert result == tmp_path / "123_photo.jpg"
 
 
 def test_resolve_path_sanitizes_filename(tmp_path: Path) -> None:
     """Invalid characters in filename are replaced."""
-    item = _make_item(url="https://cdn.example.com/a/photo<bad>.jpg")
+    item = _make_item(url="https://cdn.example.com/a/photo<bad>.jpg", post_id=456)
     result = _resolve_path(item, tmp_path)
 
     assert "<" not in result.name
     assert ">" not in result.name
+    assert result.name.startswith("456_")
     assert result.parent == tmp_path
 
 

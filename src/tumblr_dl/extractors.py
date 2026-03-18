@@ -329,14 +329,28 @@ def _extract_photo(
 ) -> list[_RawMedia]:
     """Extract image URLs from a photo post."""
     if "photos" in post:
-        return [
-            (photo["original_size"]["url"], MediaType.IMAGE) for photo in post["photos"]
-        ]
+        items: list[_RawMedia] = []
+        for photo in post["photos"]:
+            original = photo.get("original_size")
+            if not isinstance(original, dict):
+                logger.warning(
+                    "Photo entry missing 'original_size' in post %d", post.get("id", 0)
+                )
+                continue
+            url = original.get("url")
+            if not isinstance(url, str) or not url:
+                logger.warning(
+                    "Photo entry missing 'url' in original_size in post %d",
+                    post.get("id", 0),
+                )
+                continue
+            items.append((url, MediaType.IMAGE))
+        return items
 
     if "photo_url" in post:
         return [(post["photo_url"], MediaType.IMAGE)]
 
-    logger.warning("No photo URL in photo post %d", post["id"])
+    logger.warning("No photo URL in photo post %d", post.get("id", 0))
     return []
 
 

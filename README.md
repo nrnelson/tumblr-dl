@@ -19,7 +19,7 @@ A CLI tool for downloading media (images, videos, audio) from Tumblr blogs using
 - Resumable — start from any post offset
 - Paginates automatically through all blog posts
 - Re-download previously failed items with `--retry-failed`
-- Sanitizes filenames for cross-platform compatibility
+- Sanitizes filenames for cross-platform compatibility (post-ID prefixed to prevent collisions)
 - Prints a summary of found/downloaded/skipped/failed files by type
 
 ## Requirements
@@ -159,6 +159,7 @@ Runs all `[blog.*]` sections from your config file. CLI flags override config va
 | `--exclude-tags PATTERNS` | off | Comma-separated glob patterns to exclude (e.g. `nsfw,explicit*`) |
 | `--exclude-blogs PATTERNS` | off | Comma-separated glob patterns of blog names to skip in reblog trails |
 | `--sync` | off | Download all blogs defined in the TOML config file |
+| `--version` | — | Show version number and exit |
 | `--debug` | off | Enable debug logging and write a log file |
 | `--log-file PATH` | off | Write debug-level logs to a specific file |
 

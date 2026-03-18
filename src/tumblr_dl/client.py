@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from typing import Any
+from urllib.parse import quote
 
 from curl_cffi.requests import AsyncSession
 from oauthlib.oauth1 import Client as OAuth1Client
@@ -95,7 +96,11 @@ class TumblrClient:
         url: str,
         error_context: dict[str, Any] | None = None,
     ) -> Any:
-        """Make a rate-limited API request with 429 backoff/retry.
+        """Make a rate-limited API request with retry on transient errors.
+
+        Retries on 429 (rate limit), 5xx (server errors), and network
+        errors (``ConnectionError``, ``OSError``). Uses exponential
+        backoff starting at 30s, capped at 5 minutes.
 
         Args:
             url: The full API URL (with query params).
@@ -105,7 +110,7 @@ class TumblrClient:
             The parsed JSON response.
 
         Raises:
-            ApiError: After all retries are exhausted or on non-429 errors.
+            ApiError: After all retries are exhausted or on non-retryable errors.
         """
         ctx = error_context or {}
         last_exc: Exception | None = None
@@ -113,28 +118,49 @@ class TumblrClient:
         for attempt in range(_RETRY_MAX_ATTEMPTS):
             await self._limiter.acquire()
 
-            signed_url, headers = self._sign_url(url)
-            response = await self._session.get(
-                signed_url,
-                headers=headers,
-                timeout=30,
-            )
-            self.api_calls += 1
-
-            if response.status_code == 429:
+            try:
+                signed_url, headers = self._sign_url(url)
+                response = await self._session.get(
+                    signed_url,
+                    headers=headers,
+                    timeout=30,
+                )
+            except (ConnectionError, OSError) as exc:
                 delay = min(
                     _RETRY_BASE_DELAY * (2**attempt),
                     _RETRY_MAX_DELAY,
                 )
                 logger.warning(
-                    "Rate limited (429). Retrying in %.0fs (attempt %d/%d).",
+                    "Network error: %s. Retrying in %.0fs (attempt %d/%d).",
+                    exc,
                     delay,
                     attempt + 1,
                     _RETRY_MAX_ATTEMPTS,
                 )
                 last_exc = ApiError(
-                    "API returned 429",
-                    context={**ctx, "status_code": 429},
+                    f"Network error: {exc}",
+                    context={**ctx, "error_type": type(exc).__name__},
+                )
+                await asyncio.sleep(delay)
+                continue
+
+            self.api_calls += 1
+
+            if response.status_code == 429 or response.status_code >= 500:
+                delay = min(
+                    _RETRY_BASE_DELAY * (2**attempt),
+                    _RETRY_MAX_DELAY,
+                )
+                logger.warning(
+                    "Server returned %d. Retrying in %.0fs (attempt %d/%d).",
+                    response.status_code,
+                    delay,
+                    attempt + 1,
+                    _RETRY_MAX_ATTEMPTS,
+                )
+                last_exc = ApiError(
+                    f"API returned {response.status_code}",
+                    context={**ctx, "status_code": response.status_code},
                 )
                 await asyncio.sleep(delay)
                 continue
@@ -150,7 +176,7 @@ class TumblrClient:
 
             return response.json()
 
-        # All retries exhausted on 429.
+        # All retries exhausted.
         raise last_exc  # type: ignore[misc]
 
     async def get_posts(
@@ -219,7 +245,7 @@ class TumblrClient:
         Raises:
             ApiError: If the API request fails or response is malformed.
         """
-        url = f"{_API_BASE}/tagged?tag={tag}&limit={limit}&npf=true"
+        url = f"{_API_BASE}/tagged?tag={quote(tag)}&limit={limit}&npf=true"
         if before is not None:
             url += f"&before={before}"
         ctx: dict[str, Any] = {"tag": tag, "before": before}

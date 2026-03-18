@@ -164,6 +164,7 @@ class DownloadTracker:
 
         Backs up the database file, then adds new columns and tables.
         Existing download records are preserved with NULL for new columns.
+        If migration fails, the backup is automatically restored.
         """
         conn = self._ensure_conn()
 
@@ -177,15 +178,24 @@ class DownloadTracker:
         await self._conn.execute("PRAGMA journal_mode=WAL")
         conn = self._conn
 
-        logger.info("Migrating database schema from v1 to v2...")
-        await conn.executescript(_MIGRATE_V1_TO_V2_SQL)
-        await conn.execute(f"PRAGMA user_version={_SCHEMA_VERSION}")
-        await conn.commit()
-        logger.info("Migration complete. Backup at %s", backup_path)
+        try:
+            logger.info("Migrating database schema from v1 to v2...")
+            await conn.executescript(_MIGRATE_V1_TO_V2_SQL)
+            await conn.execute(f"PRAGMA user_version={_SCHEMA_VERSION}")
+            await conn.commit()
+            logger.info("Migration complete. Backup at %s", backup_path)
+        except Exception:
+            logger.error("Migration failed. Restoring backup from %s...", backup_path)
+            await conn.close()
+            shutil.copy2(backup_path, self._db_path)
+            self._conn = await aiosqlite.connect(self._db_path)
+            await self._conn.execute("PRAGMA journal_mode=WAL")
+            raise
 
     async def close(self) -> None:
-        """Close the database connection."""
+        """Flush pending writes and close the database connection."""
         if self._conn:
+            await self._conn.commit()
             await self._conn.close()
             self._conn = None
 
@@ -207,6 +217,15 @@ class DownloadTracker:
             msg = "Tracker is not open. Use 'async with' or call open()."
             raise RuntimeError(msg)
         return self._conn
+
+    async def commit(self) -> None:
+        """Flush pending writes to disk.
+
+        Call this after processing each batch of posts rather than
+        after every individual insert for better performance.
+        """
+        conn = self._ensure_conn()
+        await conn.commit()
 
     # --- Blog state ---
 
@@ -341,7 +360,6 @@ class DownloadTracker:
                 content_labels,
             ),
         )
-        await conn.commit()
 
     async def get_failed_downloads(self, blog_name: str) -> list[dict[str, Any]]:
         """Return all failed download records for a blog.
@@ -406,8 +424,6 @@ class DownloadTracker:
                 ),
             )
 
-        await conn.commit()
-
     # --- Skipped posts ---
 
     async def record_skipped_post(
@@ -432,4 +448,3 @@ class DownloadTracker:
             "VALUES (?, ?, ?, ?, datetime('now'))",
             (blog_name, post_id, skip_reason, matched_tag),
         )
-        await conn.commit()

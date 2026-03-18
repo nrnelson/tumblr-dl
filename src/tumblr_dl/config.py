@@ -6,12 +6,15 @@ Auth priority: env vars > TOML [auth] section.
 
 from __future__ import annotations
 
+import logging
 import os
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from tumblr_dl.exceptions import ConfigError
+
+logger = logging.getLogger(__name__)
 
 _AUTH_ENV_VARS = {
     "consumer_key": "TUMBLR_CONSUMER_KEY",
@@ -110,15 +113,25 @@ def _load_auth_from_env() -> AuthCredentials | None:
     )
 
 
-def _parse_blog_config(data: dict[str, object]) -> BlogConfig:
+def _parse_blog_config(
+    data: dict[str, object], section_name: str = "blog"
+) -> BlogConfig:
     """Parse a TOML table into a BlogConfig."""
     config = BlogConfig()
     str_fields = {"output_dir", "tag", "db_path"}
     list_fields = {"exclude_tags", "exclude_blogs"}
     int_fields = {"max_posts", "start_post"}
     bool_fields = {"full_scan", "retry_failed", "no_db"}
+    known_keys = str_fields | list_fields | int_fields | bool_fields
 
     for key, value in data.items():
+        if key not in known_keys:
+            logger.warning(
+                "Unknown config key '%s' in [%s] section (ignored).",
+                key,
+                section_name,
+            )
+            continue
         if key in str_fields:
             if not isinstance(value, str):
                 raise ConfigError(
@@ -236,7 +249,7 @@ def load_toml_config(path: Path) -> AppConfig:
     # Parse [defaults] section.
     defaults_data = data.get("defaults")
     if isinstance(defaults_data, dict):
-        app.defaults = _parse_blog_config(defaults_data)
+        app.defaults = _parse_blog_config(defaults_data, section_name="defaults")
 
     # Parse [blog.*] sections.
     blog_data = data.get("blog")
@@ -247,7 +260,7 @@ def load_toml_config(path: Path) -> AppConfig:
                     f"[blog.{name}] must be a table",
                     context={"blog": name},
                 )
-            app.blogs[name] = _parse_blog_config(section)
+            app.blogs[name] = _parse_blog_config(section, section_name=f"blog.{name}")
 
     return app
 
@@ -282,14 +295,14 @@ def load_auth(app_config: AppConfig | None = None) -> AuthCredentials:
 
 
 def resolve_blog_config(
-    blog_name: str,
+    blog_name: str | None,
     app_config: AppConfig | None,
     cli_overrides: dict[str, object],
 ) -> BlogConfig:
     """Merge config layers: hardcoded defaults < TOML defaults < per-blog < CLI.
 
     Args:
-        blog_name: Blog being downloaded.
+        blog_name: Blog being downloaded, or None for tag-only mode.
         app_config: Parsed TOML config (or None).
         cli_overrides: CLI flag values (None means not provided).
 
@@ -303,7 +316,7 @@ def resolve_blog_config(
         _overlay(config, app_config.defaults)
 
     # Layer 3: TOML [blog.<name>].
-    if app_config and blog_name in app_config.blogs:
+    if app_config and blog_name and blog_name in app_config.blogs:
         _overlay(config, app_config.blogs[blog_name])
 
     # Layer 4: CLI overrides (only non-None values).

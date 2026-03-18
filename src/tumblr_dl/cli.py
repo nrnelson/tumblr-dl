@@ -14,6 +14,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+from tumblr_dl import __version__
 from tumblr_dl.client import TumblrClient
 from tumblr_dl.config import (
     AppConfig,
@@ -60,6 +61,11 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="tumblr-dl",
         description="Download media from a Tumblr blog or tag search.",
+    )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"%(prog)s {__version__}",
     )
     parser.add_argument(
         "blog_names",
@@ -460,6 +466,10 @@ async def _download_blog(
                 )
                 break
 
+        # Flush tracker writes after each pagination batch.
+        if tracker:
+            await tracker.commit()
+
         if stats.early_stopped:
             break
         if max_posts and stats.posts_processed >= max_posts:
@@ -587,6 +597,10 @@ async def _download_tagged(
                     max_posts,
                 )
                 break
+
+        # Flush tracker writes after each pagination batch.
+        if tracker:
+            await tracker.commit()
 
         if max_posts and stats.posts_processed >= max_posts:
             break
@@ -785,21 +799,22 @@ async def _run(args: argparse.Namespace) -> int:
         logger.error("At least one blog_name is required unless --tag is specified.")
         return _EXIT_CONFIG
 
-    # Resolve config for the first blog (or defaults for tag mode).
-    first_blog = blog_names_cli[0] if blog_names_cli else "__tag_search__"
-    base_config = resolve_blog_config(first_blog, app_config, overrides)
-
     start_time = time.monotonic()
 
     try:
         auth = load_auth(app_config)
         async with TumblrClient(auth) as client:
-            tracker, dedup = await _setup_tracker_and_dedup(base_config)
+            total_stats = DownloadStats()
 
-            try:
-                total_stats = DownloadStats()
-
-                if tag:
+            if tag:
+                # Tag mode: single tracker for the tag search.
+                base_config = resolve_blog_config(
+                    blog_names_cli[0] if blog_names_cli else None,
+                    app_config,
+                    overrides,
+                )
+                tracker, dedup = await _setup_tracker_and_dedup(base_config)
+                try:
                     output_dir = Path(base_config.output_dir).expanduser()
                     output_dir.mkdir(parents=True, exist_ok=True)
                     exclude_patterns = _parse_exclude_patterns(base_config.exclude_tags)
@@ -822,42 +837,45 @@ async def _run(args: argparse.Namespace) -> int:
                         exclude_patterns=exclude_patterns,
                         exclude_blog_patterns=exclude_blog_patterns,
                     )
-                else:
-                    for i, blog_name in enumerate(blog_names_cli):
-                        blog_config = resolve_blog_config(
-                            blog_name, app_config, overrides
-                        )
+                finally:
+                    if tracker:
+                        await tracker.close()
+            else:
+                # Ad-hoc blog mode: per-blog tracker/dedup to match --sync.
+                for i, blog_name in enumerate(blog_names_cli):
+                    blog_config = resolve_blog_config(blog_name, app_config, overrides)
 
-                        if len(blog_names_cli) > 1:
-                            logger.info(
-                                "--- Blog %d/%d: %s ---",
-                                i + 1,
-                                len(blog_names_cli),
-                                blog_name,
-                            )
+                    if len(blog_names_cli) > 1:
                         logger.info(
-                            "Starting download from %s to %s",
+                            "--- Blog %d/%d: %s ---",
+                            i + 1,
+                            len(blog_names_cli),
                             blog_name,
-                            blog_config.output_dir,
                         )
+                    logger.info(
+                        "Starting download from %s to %s",
+                        blog_name,
+                        blog_config.output_dir,
+                    )
 
+                    tracker, dedup = await _setup_tracker_and_dedup(blog_config)
+                    try:
                         blog_stats = await _run_blog_download(
                             client, blog_name, blog_config, tracker, dedup
                         )
+                    finally:
+                        if tracker:
+                            await tracker.close()
 
-                        if len(blog_names_cli) > 1:
-                            logger.info(
-                                "  %s: %d posts, %d downloaded",
-                                blog_name,
-                                blog_stats.posts_processed,
-                                sum(blog_stats.downloaded.values()),
-                            )
+                    if len(blog_names_cli) > 1:
+                        logger.info(
+                            "  %s: %d posts, %d downloaded",
+                            blog_name,
+                            blog_stats.posts_processed,
+                            sum(blog_stats.downloaded.values()),
+                        )
 
-                        _merge_stats(total_stats, blog_stats)
-
-            finally:
-                if tracker:
-                    await tracker.close()
+                    _merge_stats(total_stats, blog_stats)
 
             total_stats.api_calls = client.api_calls
             total_stats.rate_limit = client._rate_limit
@@ -878,7 +896,11 @@ def main() -> None:
     """CLI entry point."""
     parser = _build_parser()
     args = parser.parse_args()
-    sys.exit(asyncio.run(_run(args)))
+    try:
+        sys.exit(asyncio.run(_run(args)))
+    except KeyboardInterrupt:
+        logger.info("\nInterrupted. Partial progress has been saved.")
+        sys.exit(130)
 
 
 if __name__ == "__main__":

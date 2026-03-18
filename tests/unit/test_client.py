@@ -104,11 +104,14 @@ async def test_get_posts_api_error_with_status() -> None:
 
 @pytest.mark.asyncio
 async def test_get_posts_network_error() -> None:
-    """Network-level failure raises ApiError with blog context."""
+    """Network-level failure retries then raises ApiError with blog context."""
     client = _stub_client()
     client._session.get = AsyncMock(side_effect=ConnectionError("timeout"))
 
-    with pytest.raises(ApiError, match="API request failed") as exc_info:
+    with (
+        patch("tumblr_dl.client.asyncio.sleep", new_callable=AsyncMock),
+        pytest.raises(ApiError, match="Network error") as exc_info,
+    ):
         await client.get_posts("testblog")
 
     assert exc_info.value.context["blog"] == "testblog"

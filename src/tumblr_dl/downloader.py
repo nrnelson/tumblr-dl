@@ -11,6 +11,7 @@ from curl_cffi.requests import AsyncSession
 
 from tumblr_dl.exceptions import DownloadError
 from tumblr_dl.models import DownloadStatus, MediaItem
+from tumblr_dl.tracker import DownloadTracker
 from tumblr_dl.utils import sanitize_filename
 
 logger = logging.getLogger(__name__)
@@ -18,7 +19,7 @@ logger = logging.getLogger(__name__)
 _USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/91.0.4472.124 Safari/537.36"
+    "Chrome/131.0.0.0 Safari/537.36"
 )
 
 
@@ -66,16 +67,12 @@ class SqliteDedup(DedupStrategy):
         tracker: An open DownloadTracker instance.
     """
 
-    def __init__(self, tracker: object) -> None:
-        # Import here to avoid circular dependency; runtime type is DownloadTracker.
+    def __init__(self, tracker: DownloadTracker) -> None:
         self._tracker = tracker
 
     async def is_duplicate(self, item: MediaItem, dest: Path) -> bool:
         """Check DB first, then filesystem as fallback."""
-        from tumblr_dl.tracker import DownloadTracker
-
-        tracker: DownloadTracker = self._tracker  # type: ignore[assignment]
-        if await tracker.is_downloaded(item.blog_name, item.url):
+        if await self._tracker.is_downloaded(item.blog_name, item.url):
             return True
         return dest.exists()
 
@@ -88,9 +85,7 @@ class SqliteDedup(DedupStrategy):
         """Record download result in the database."""
         if status is DownloadStatus.SKIPPED:
             return
-        from tumblr_dl.tracker import DownloadTracker
-
-        tracker: DownloadTracker = self._tracker  # type: ignore[assignment]
+        tracker = self._tracker
         file_size: int | None = None
         if status is DownloadStatus.SUCCESS and dest.exists():
             file_size = dest.stat().st_size
@@ -115,10 +110,14 @@ class SqliteDedup(DedupStrategy):
 
 
 def _resolve_path(item: MediaItem, output_dir: Path) -> Path:
-    """Determine the local file path for a media item."""
+    """Determine the local file path for a media item.
+
+    Prefixes with post_id to prevent filename collisions across posts
+    (Tumblr frequently reuses generic basenames like ``tumblr_abc123.jpg``).
+    """
     raw_name = Path(urlparse(item.url).path).name
     safe_name = sanitize_filename(raw_name)
-    return output_dir / safe_name
+    return output_dir / f"{item.post_id}_{safe_name}"
 
 
 async def _async_download(url: str, dest: Path, blog_name: str) -> None:
@@ -160,6 +159,8 @@ async def _async_download(url: str, dest: Path, blog_name: str) -> None:
         tmp.write_bytes(data)
         tmp.rename(dest)
     except BaseException:
+        # Catch BaseException (not just Exception) to ensure the .part
+        # file is cleaned up on KeyboardInterrupt and SystemExit too.
         tmp.unlink(missing_ok=True)
         raise
 
