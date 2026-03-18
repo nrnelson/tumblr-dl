@@ -301,6 +301,13 @@ def _extract_npf_blocks(
             url = _npf_media_url(block)
             media_type = MediaType.AUDIO
 
+        if block_type and block_type not in {"image", "video", "audio", "text", "link"}:
+            logger.debug(
+                "Skipping unrecognized NPF block type '%s' in post %d",
+                block_type,
+                post.get("id", 0),
+            )
+
         if url and media_type and url not in seen_urls:
             seen_urls.add(url)
             items.append((url, media_type))
@@ -371,7 +378,7 @@ def _extract_video(
                 if isinstance(src, str):
                     return [(src, MediaType.VIDEO)]
 
-    logger.warning("No video URL in video post %d", post["id"])
+    logger.warning("No video URL in video post %d", post.get("id", 0))
     return []
 
 
@@ -382,7 +389,7 @@ def _extract_audio(
     if "audio_url" in post:
         return [(post["audio_url"], MediaType.AUDIO)]
 
-    logger.warning("No audio URL in audio post %d", post["id"])
+    logger.warning("No audio URL in audio post %d", post.get("id", 0))
     return []
 
 

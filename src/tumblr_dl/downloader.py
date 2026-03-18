@@ -16,7 +16,7 @@ from tumblr_dl.utils import sanitize_filename
 
 logger = logging.getLogger(__name__)
 
-# Last updated: 2025-05
+# Last updated: 2026-03
 _USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -103,8 +103,8 @@ class SqliteDedup(DedupStrategy):
             media_type=item.media_type.value,
             status=status.value,
             file_size=file_size,
-            post_url=item.post_url or None,
-            post_timestamp=item.post_timestamp or None,
+            post_url=item.post_url or None,  # "" → NULL in SQLite
+            post_timestamp=item.post_timestamp or None,  # 0 → NULL in SQLite
             original_post_timestamp=item.original_post_timestamp,
             content_labels=content_labels_str,
         )
@@ -157,6 +157,19 @@ async def _async_download(url: str, dest: Path, blog_name: str) -> None:
                 async for chunk in response.aiter_content():
                     f.write(chunk)
                     total_bytes += len(chunk)
+
+        # Validate against Content-Length to detect truncated downloads.
+        expected = response.headers.get("content-length")
+        if expected is not None and total_bytes != int(expected):
+            raise DownloadError(
+                f"Incomplete download: got {total_bytes} bytes, "
+                f"expected {expected}: {url}",
+                context={
+                    "url": url,
+                    "expected_bytes": int(expected),
+                    "actual_bytes": total_bytes,
+                },
+            )
 
         logger.debug(
             "Downloaded %d bytes (content-type: %s) for %s: %s",

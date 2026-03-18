@@ -11,6 +11,7 @@ import sys
 import time
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 from dotenv import load_dotenv
 
@@ -258,7 +259,7 @@ def _collect_trail_blogs(metadata: PostMetadata) -> list[str]:
 
 
 async def _process_post(
-    post: dict[str, object],
+    post: dict[str, Any],
     blog_name: str,
     output_dir: Path,
     dedup: DedupStrategy,
@@ -282,7 +283,7 @@ async def _process_post(
     Returns:
         True if the post was processed, False if excluded.
     """
-    post_id: int = post["id"]  # type: ignore[assignment]
+    post_id: int = post["id"]
     metadata = extract_post_metadata(post, blog_name)
 
     if tracker:
@@ -649,6 +650,8 @@ async def _run_blog_download(
     output_dir = Path(blog_config.output_dir).expanduser()
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    # Normalize patterns (lowercase/strip) — needed for TOML-sourced values
+    # that bypass CLI parsing.
     exclude_patterns = _parse_exclude_patterns(blog_config.exclude_tags)
     exclude_blog_patterns = _parse_exclude_patterns(blog_config.exclude_blogs)
 
@@ -798,9 +801,11 @@ async def _run(args: argparse.Namespace) -> int:
 
         except ConfigError as exc:
             logger.error("%s", exc)
+            logger.debug("Error context: %s", exc.context)
             return _EXIT_CONFIG
         except TumblrDlError as exc:
             logger.error("API error: %s", exc)
+            logger.debug("Error context: %s", exc.context)
             return _EXIT_RUNTIME
 
         total_stats.elapsed_seconds = time.monotonic() - start_time
@@ -823,6 +828,12 @@ async def _run(args: argparse.Namespace) -> int:
             total_stats = DownloadStats()
 
             if tag:
+                if blog_names_cli:
+                    logger.warning(
+                        "--tag performs a global Tumblr search. "
+                        "Blog name '%s' is used for config resolution only.",
+                        blog_names_cli[0],
+                    )
                 # Tag mode: single tracker for the tag search.
                 base_config = resolve_blog_config(
                     blog_names_cli[0] if blog_names_cli else None,
@@ -898,9 +909,11 @@ async def _run(args: argparse.Namespace) -> int:
 
     except ConfigError as exc:
         logger.error("%s", exc)
+        logger.debug("Error context: %s", exc.context)
         return _EXIT_CONFIG
     except TumblrDlError as exc:
         logger.error("API error: %s", exc)
+        logger.debug("Error context: %s", exc.context)
         return _EXIT_RUNTIME
 
     total_stats.elapsed_seconds = time.monotonic() - start_time

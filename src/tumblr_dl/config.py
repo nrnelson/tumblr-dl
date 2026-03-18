@@ -280,10 +280,12 @@ def load_auth(app_config: AppConfig | None = None) -> AuthCredentials:
     # Priority 1: environment variables.
     env_auth = _load_auth_from_env()
     if env_auth:
+        logger.debug("Loaded OAuth credentials from environment variables")
         return env_auth
 
     # Priority 2: TOML [auth] section.
     if app_config and app_config.auth:
+        logger.debug("Loaded OAuth credentials from TOML [auth] section")
         return app_config.auth
 
     raise ConfigError(
@@ -328,7 +330,11 @@ def resolve_blog_config(
 
 
 def _overlay(target: BlogConfig, source: BlogConfig) -> None:
-    """Copy non-default values from source onto target."""
+    """Copy non-default values from source onto target.
+
+    Note: values that match BlogConfig() defaults are not copied, so a
+    per-blog section cannot reset a [defaults] value back to the default.
+    """
     defaults = BlogConfig()
     for attr in vars(defaults):
         source_val = getattr(source, attr)

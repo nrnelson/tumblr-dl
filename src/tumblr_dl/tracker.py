@@ -110,6 +110,12 @@ class DownloadTracker:
             await self._conn.executescript(_SCHEMA_SQL)
             await self._conn.execute(f"PRAGMA user_version={_SCHEMA_VERSION}")
             await self._conn.commit()
+        elif version > _SCHEMA_VERSION:
+            msg = (
+                f"Database schema v{version} is newer than supported "
+                f"v{_SCHEMA_VERSION}. Please upgrade tumblr-dl."
+            )
+            raise RuntimeError(msg)
 
         logger.debug(
             "Opened tracker database: %s (schema v%d)", self._db_path, _SCHEMA_VERSION

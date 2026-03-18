@@ -46,6 +46,7 @@ dev = [
     "pre-commit>=3.0",
     "types-oauthlib>=3.2",
     "types-beautifulsoup4>=4.12",
+    "types-aiosqlite>=0.20",
 ]
 
 [project.scripts]
