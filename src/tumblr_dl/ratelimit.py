@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
+
+logger = logging.getLogger(__name__)
 
 
 class AsyncRateLimiter:
@@ -44,6 +47,7 @@ class AsyncRateLimiter:
                     return
                 # Calculate how long until the next token arrives.
                 wait = (1.0 - self._tokens) / (self._max_calls / self._period)
+            logger.debug("Rate limited, waiting %.2fs for token", wait)
             await asyncio.sleep(wait)
 
     def _refill(self) -> None:

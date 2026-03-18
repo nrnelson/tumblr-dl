@@ -16,6 +16,7 @@ from tumblr_dl.utils import sanitize_filename
 
 logger = logging.getLogger(__name__)
 
+# Last updated: 2025-05
 _USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -121,46 +122,55 @@ def _resolve_path(item: MediaItem, output_dir: Path) -> Path:
 
 
 async def _async_download(url: str, dest: Path, blog_name: str) -> None:
-    """Download a file using native async HTTP.
+    """Download a file using native async HTTP with streaming.
 
     Uses a fresh session per request to avoid curl_cffi connection-pool
     issues (stale keep-alive connections cause IncompleteRead / ConnectionError
     on Tumblr's CDN).
 
-    Writes to a temporary file first, then renames on success.
+    Streams the response to a temporary file, then renames on success.
     """
     headers = {
         "User-Agent": _USER_AGENT,
         "Referer": f"https://{blog_name}.tumblr.com/",
     }
-    # Fresh session per download — curl_cffi's shared session reuses
-    # keep-alive connections that Tumblr's CDN resets mid-transfer.
-    async with AsyncSession() as session:
-        response = await session.get(url, headers=headers, timeout=(30, 300))
-    response.raise_for_status()
-
-    # Reject HTML error pages served with 200 status
-    content_type = response.headers.get("content-type", "")
-    if "text/html" in content_type:
-        raise DownloadError(
-            f"Server returned HTML instead of media: {url}",
-            context={"url": url, "content_type": content_type},
-        )
-
-    # Loads full response into memory; curl_cffi async doesn't support streaming.
-    data = response.content
-    logger.debug(
-        "Downloaded %d bytes (content-type: %s): %s", len(data), content_type, url
-    )
-    if not data:
-        raise DownloadError(
-            f"Downloaded file is empty (0 bytes): {url}",
-            context={"url": url},
-        )
-
     tmp = dest.with_suffix(dest.suffix + ".part")
     try:
-        tmp.write_bytes(data)
+        # Fresh session per download — curl_cffi's shared session reuses
+        # keep-alive connections that Tumblr's CDN resets mid-transfer.
+        async with (
+            AsyncSession() as session,
+            session.stream("GET", url, headers=headers, timeout=(30, 300)) as response,
+        ):
+            response.raise_for_status()
+
+            # Reject HTML error pages served with 200 status.
+            content_type = response.headers.get("content-type", "")
+            if "text/html" in content_type:
+                raise DownloadError(
+                    f"Server returned HTML instead of media: {url}",
+                    context={"url": url, "content_type": content_type},
+                )
+
+            total_bytes = 0
+            with open(tmp, "wb") as f:
+                async for chunk in response.aiter_content():
+                    f.write(chunk)
+                    total_bytes += len(chunk)
+
+        logger.debug(
+            "Downloaded %d bytes (content-type: %s) for %s: %s",
+            total_bytes,
+            content_type,
+            blog_name,
+            url,
+        )
+        if total_bytes == 0:
+            raise DownloadError(
+                f"Downloaded file is empty (0 bytes): {url}",
+                context={"url": url},
+            )
+
         tmp.rename(dest)
     except BaseException:
         # Catch BaseException (not just Exception) to ensure the .part

@@ -16,14 +16,6 @@ class TumblrDlError(Exception):
         super().__init__(message)
         self.context = context or {}
 
-    def to_dict(self) -> dict[str, Any]:
-        """Return structured representation for logging."""
-        return {
-            "error": type(self).__name__,
-            "message": str(self),
-            "context": self.context,
-        }
-
 
 class ConfigError(TumblrDlError):
     """Raised when configuration is missing or invalid."""

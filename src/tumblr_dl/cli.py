@@ -48,6 +48,7 @@ from tumblr_dl.tracker import DownloadTracker
 
 logger = logging.getLogger(__name__)
 
+# Tumblr API v2 maximum posts per request.
 _BATCH_SIZE = 20
 
 # Exit codes
@@ -256,6 +257,79 @@ def _collect_trail_blogs(metadata: PostMetadata) -> list[str]:
     return blogs
 
 
+async def _process_post(
+    post: dict[str, object],
+    blog_name: str,
+    output_dir: Path,
+    dedup: DedupStrategy,
+    tracker: DownloadTracker | None,
+    stats: DownloadStats,
+    exclude_patterns: list[str] | None,
+    exclude_blog_patterns: list[str] | None,
+) -> bool:
+    """Process a single post: check exclusions, extract media, download.
+
+    Args:
+        post: Raw post dict from the Tumblr API.
+        blog_name: Blog the post belongs to (for logging and exclusion).
+        output_dir: Directory to save files into.
+        dedup: Duplicate detection strategy.
+        tracker: Optional SQLite tracker.
+        stats: Stats object to record results into.
+        exclude_patterns: Tag glob patterns to skip.
+        exclude_blog_patterns: Blog glob patterns to skip.
+
+    Returns:
+        True if the post was processed, False if excluded.
+    """
+    post_id: int = post["id"]  # type: ignore[assignment]
+    metadata = extract_post_metadata(post, blog_name)
+
+    if tracker:
+        await tracker.record_post_metadata(metadata)
+
+    # Tag exclusion check.
+    if exclude_patterns and metadata.tags:
+        matched = _matches_exclusion(metadata.tags, exclude_patterns)
+        if matched:
+            logger.info(
+                "Skipping post %d: tag '%s' matches exclusion pattern.",
+                post_id,
+                matched,
+            )
+            if tracker:
+                await tracker.record_skipped_post(
+                    blog_name, post_id, "tag_exclusion", matched
+                )
+            return False
+
+    # Blog exclusion check — skip if any blog in the reblog trail matches.
+    if exclude_blog_patterns:
+        trail_blogs = _collect_trail_blogs(metadata)
+        matched_blog = _matches_exclusion(trail_blogs, exclude_blog_patterns)
+        if matched_blog:
+            logger.info(
+                "Skipping post %d: reblogged from excluded blog '%s'.",
+                post_id,
+                matched_blog,
+            )
+            if tracker:
+                await tracker.record_skipped_post(
+                    blog_name, post_id, "blog_exclusion", matched_blog
+                )
+            return False
+
+    for item in extract_media(post, blog_name, metadata=metadata):
+        try:
+            status = await download_item(item, output_dir, dedup)
+        except DownloadError as exc:
+            logger.warning("%s", exc)
+            status = DownloadStatus.FAILED
+        stats.record(item.media_type, status)
+
+    return True
+
+
 def _cli_overrides(args: argparse.Namespace) -> dict[str, object]:
     """Extract CLI flag values as a dict for config merging.
 
@@ -410,55 +484,16 @@ async def _download_blog(
                 post.get("type", "unknown"),
             )
 
-            # Extract post metadata (tags, trail, content labels).
-            metadata = extract_post_metadata(post, blog_name)
-
-            # Record metadata to DB.
-            if tracker:
-                await tracker.record_post_metadata(metadata)
-
-            # Tag exclusion check.
-            if exclude_patterns and metadata.tags:
-                matched = _matches_exclusion(metadata.tags, exclude_patterns)
-                if matched:
-                    logger.info(
-                        "Skipping post %d: tag '%s' matches exclusion pattern.",
-                        post_id,
-                        matched,
-                    )
-                    if tracker:
-                        await tracker.record_skipped_post(
-                            blog_name, post_id, "tag_exclusion", matched
-                        )
-                    continue
-
-            # Blog exclusion check — skip if any blog in the reblog
-            # trail matches an excluded pattern.
-            if exclude_blog_patterns:
-                trail_blogs = _collect_trail_blogs(metadata)
-                matched_blog = _matches_exclusion(trail_blogs, exclude_blog_patterns)
-                if matched_blog:
-                    logger.info(
-                        "Skipping post %d: reblogged from excluded blog '%s'.",
-                        post_id,
-                        matched_blog,
-                    )
-                    if tracker:
-                        await tracker.record_skipped_post(
-                            blog_name,
-                            post_id,
-                            "blog_exclusion",
-                            matched_blog,
-                        )
-                    continue
-
-            for item in extract_media(post, blog_name, metadata=metadata):
-                try:
-                    status = await download_item(item, output_dir, dedup)
-                except DownloadError as exc:
-                    logger.warning("%s", exc)
-                    status = DownloadStatus.FAILED
-                stats.record(item.media_type, status)
+            await _process_post(
+                post,
+                blog_name,
+                output_dir,
+                dedup,
+                tracker,
+                stats,
+                exclude_patterns,
+                exclude_blog_patterns,
+            )
 
             if max_posts and stats.posts_processed >= max_posts:
                 logger.info(
@@ -545,53 +580,16 @@ async def _download_tagged(
                 post.get("type", "unknown"),
             )
 
-            # Extract post metadata.
-            metadata = extract_post_metadata(post, post_blog)
-
-            if tracker:
-                await tracker.record_post_metadata(metadata)
-
-            # Tag exclusion check.
-            if exclude_patterns and metadata.tags:
-                matched = _matches_exclusion(metadata.tags, exclude_patterns)
-                if matched:
-                    logger.info(
-                        "Skipping post %d: tag '%s' matches exclusion pattern.",
-                        post_id,
-                        matched,
-                    )
-                    if tracker:
-                        await tracker.record_skipped_post(
-                            post_blog, post_id, "tag_exclusion", matched
-                        )
-                    continue
-
-            # Blog exclusion check.
-            if exclude_blog_patterns:
-                trail_blogs = _collect_trail_blogs(metadata)
-                matched_blog = _matches_exclusion(trail_blogs, exclude_blog_patterns)
-                if matched_blog:
-                    logger.info(
-                        "Skipping post %d: reblogged from excluded blog '%s'.",
-                        post_id,
-                        matched_blog,
-                    )
-                    if tracker:
-                        await tracker.record_skipped_post(
-                            post_blog,
-                            post_id,
-                            "blog_exclusion",
-                            matched_blog,
-                        )
-                    continue
-
-            for item in extract_media(post, post_blog, metadata=metadata):
-                try:
-                    status = await download_item(item, output_dir, dedup)
-                except DownloadError as exc:
-                    logger.warning("%s", exc)
-                    status = DownloadStatus.FAILED
-                stats.record(item.media_type, status)
+            await _process_post(
+                post,
+                post_blog,
+                output_dir,
+                dedup,
+                tracker,
+                stats,
+                exclude_patterns,
+                exclude_blog_patterns,
+            )
 
             if max_posts and stats.posts_processed >= max_posts:
                 logger.info(
@@ -740,6 +738,11 @@ async def _run(args: argparse.Namespace) -> int:
 
     # Handle --sync flag.
     if args.sync:
+        if args.blog_names:
+            logger.warning(
+                "Ignoring positional blog names when --sync is used. "
+                "Blogs are read from the config file."
+            )
         if not app_config or not app_config.blogs:
             logger.error(
                 "No blogs configured. Add [blog.*] sections to your config.toml."
