@@ -4,20 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
 from tumblr_dl.tracker import DownloadTracker
-
-
-@pytest.fixture
-async def tracker(tmp_path: Path) -> DownloadTracker:
-    """Provide an open tracker with an in-memory-like temp DB."""
-    db_path = tmp_path / ".tumblr-dl.db"
-    t = DownloadTracker(db_path)
-    await t.open()
-    yield t  # type: ignore[misc]
-    await t.close()
-
 
 # --- Schema ---
 

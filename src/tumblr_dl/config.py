@@ -187,6 +187,11 @@ def _parse_app_settings(data: dict[str, object]) -> AppSettings:
                     context={"key": key, "value": value},
                 )
             settings.log_file = value
+        else:
+            logger.warning(
+                "Unknown config key '%s' in [settings] section (ignored).",
+                key,
+            )
     return settings
 
 

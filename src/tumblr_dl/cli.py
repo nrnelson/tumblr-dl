@@ -453,7 +453,7 @@ async def _download_blog(
     while True:
         posts = await client.get_posts(blog_name, offset=offset, limit=_BATCH_SIZE)
         if not posts:
-            logger.info("No more posts found.")
+            logger.info("No more posts found for %s.", blog_name)
             break
 
         for post in posts:
@@ -561,7 +561,7 @@ async def _download_tagged(
     while True:
         posts = await client.get_tagged_posts(tag, before=before, limit=_BATCH_SIZE)
         if not posts:
-            logger.info("No more tagged posts found.")
+            logger.info("No more tagged posts found for '%s'.", tag)
             break
 
         for post in posts:
@@ -783,23 +783,23 @@ async def _run(args: argparse.Namespace) -> int:
 
     overrides = _cli_overrides(args)
 
-    # Handle --sync flag.
-    if args.sync:
-        if args.blog_names:
-            logger.warning(
-                "Ignoring positional blog names when --sync is used. "
-                "Blogs are read from the config file."
-            )
-        if not app_config or not app_config.blogs:
-            logger.error(
-                "No blogs configured. Add [blog.*] sections to your config.toml."
-            )
-            return _EXIT_CONFIG
+    start_time = time.monotonic()
 
-        auth = load_auth(app_config)
-        start_time = time.monotonic()
+    try:
+        # Handle --sync flag.
+        if args.sync:
+            if args.blog_names:
+                logger.warning(
+                    "Ignoring positional blog names when --sync is used. "
+                    "Blogs are read from the config file."
+                )
+            if not app_config or not app_config.blogs:
+                logger.error(
+                    "No blogs configured. Add [blog.*] sections to your config.toml."
+                )
+                return _EXIT_CONFIG
 
-        try:
+            auth = load_auth(app_config)
             async with TumblrClient(auth) as client:
                 total_stats = DownloadStats()
                 blog_names = list(app_config.blogs.keys())
@@ -809,86 +809,75 @@ async def _run(args: argparse.Namespace) -> int:
                 total_stats.api_calls = client.api_calls
                 total_stats.rate_limit = client.rate_limit
 
-        except ConfigError as exc:
-            logger.error("%s", exc)
-            logger.debug("Error context: %s", exc.context)
-            return _EXIT_CONFIG
-        except TumblrDlError as exc:
-            logger.error("API error: %s", exc)
-            logger.debug("Error context: %s", exc.context)
-            return _EXIT_RUNTIME
+        else:
+            # Ad-hoc mode: blog names from CLI.
+            blog_names_cli: list[str] = args.blog_names or []
+            tag: str | None = (
+                str(overrides["tag"])
+                if overrides.get("tag")
+                else (app_config.defaults.tag if app_config else None)
+            )
 
-        total_stats.elapsed_seconds = time.monotonic() - start_time
-        logger.info("\n%s", total_stats.summary())
-        return _EXIT_OK
-
-    # Ad-hoc mode: blog names from CLI.
-    blog_names_cli: list[str] = args.blog_names or []
-    tag: str | None = (
-        str(overrides["tag"])
-        if overrides.get("tag")
-        else (app_config.defaults.tag if app_config else None)
-    )
-
-    if not tag and not blog_names_cli:
-        logger.error("At least one blog_name is required unless --tag is specified.")
-        return _EXIT_CONFIG
-
-    start_time = time.monotonic()
-
-    try:
-        auth = load_auth(app_config)
-        async with TumblrClient(auth) as client:
-            total_stats = DownloadStats()
-
-            if tag:
-                if blog_names_cli:
-                    logger.warning(
-                        "--tag performs a global Tumblr search. "
-                        "Blog name '%s' is used for config resolution only.",
-                        blog_names_cli[0],
-                    )
-                # Tag mode: single tracker for the tag search.
-                base_config = resolve_blog_config(
-                    blog_names_cli[0] if blog_names_cli else None,
-                    app_config,
-                    overrides,
+            if not tag and not blog_names_cli:
+                logger.error(
+                    "At least one blog_name is required unless --tag is specified."
                 )
-                tracker, dedup = await _setup_tracker_and_dedup(base_config)
-                try:
-                    output_dir = Path(base_config.output_dir).expanduser()
-                    output_dir.mkdir(parents=True, exist_ok=True)
-                    exclude_patterns = _parse_exclude_patterns(base_config.exclude_tags)
-                    exclude_blog_patterns = _parse_exclude_patterns(
-                        base_config.exclude_blogs
+                return _EXIT_CONFIG
+
+            auth = load_auth(app_config)
+            async with TumblrClient(auth) as client:
+                total_stats = DownloadStats()
+
+                if tag:
+                    if blog_names_cli:
+                        logger.warning(
+                            "--tag performs a global Tumblr search. "
+                            "Blog name '%s' is used for config resolution only.",
+                            blog_names_cli[0],
+                        )
+                    # Tag mode: single tracker for the tag search.
+                    base_config = resolve_blog_config(
+                        blog_names_cli[0] if blog_names_cli else None,
+                        app_config,
+                        overrides,
+                    )
+                    tracker, dedup = await _setup_tracker_and_dedup(base_config)
+                    try:
+                        output_dir = Path(base_config.output_dir).expanduser()
+                        output_dir.mkdir(parents=True, exist_ok=True)
+                        exclude_patterns = _parse_exclude_patterns(
+                            base_config.exclude_tags
+                        )
+                        exclude_blog_patterns = _parse_exclude_patterns(
+                            base_config.exclude_blogs
+                        )
+
+                        logger.info(
+                            "Starting tag search for '%s' to %s",
+                            tag,
+                            output_dir,
+                        )
+                        total_stats = await _download_tagged(
+                            client=client,
+                            tag=tag,
+                            output_dir=output_dir,
+                            dedup=dedup,
+                            tracker=tracker,
+                            max_posts=base_config.max_posts,
+                            exclude_patterns=exclude_patterns,
+                            exclude_blog_patterns=exclude_blog_patterns,
+                        )
+                    finally:
+                        if tracker:
+                            await tracker.close()
+                else:
+                    # Ad-hoc blog mode: per-blog tracker/dedup to match --sync.
+                    await _process_blog_list(
+                        client, blog_names_cli, app_config, overrides, total_stats
                     )
 
-                    logger.info(
-                        "Starting tag search for '%s' to %s",
-                        tag,
-                        output_dir,
-                    )
-                    total_stats = await _download_tagged(
-                        client=client,
-                        tag=tag,
-                        output_dir=output_dir,
-                        dedup=dedup,
-                        tracker=tracker,
-                        max_posts=base_config.max_posts,
-                        exclude_patterns=exclude_patterns,
-                        exclude_blog_patterns=exclude_blog_patterns,
-                    )
-                finally:
-                    if tracker:
-                        await tracker.close()
-            else:
-                # Ad-hoc blog mode: per-blog tracker/dedup to match --sync.
-                await _process_blog_list(
-                    client, blog_names_cli, app_config, overrides, total_stats
-                )
-
-            total_stats.api_calls = client.api_calls
-            total_stats.rate_limit = client.rate_limit
+                total_stats.api_calls = client.api_calls
+                total_stats.rate_limit = client.rate_limit
 
     except ConfigError as exc:
         logger.error("%s", exc)

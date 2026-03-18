@@ -101,7 +101,7 @@ class DownloadStats:
     elapsed_seconds: float = 0.0
     rate_limit: int = 300
     early_stopped: bool = False
-    early_stop_post_id: int = 0
+    early_stop_post_id: int | None = None
 
     def record(
         self,

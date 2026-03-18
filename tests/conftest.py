@@ -2,11 +2,24 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 import pytest
 
+from tumblr_dl.tracker import DownloadTracker
+
 _TUMBLR_MEDIA = "https://64.media.tumblr.com"
+
+
+@pytest.fixture
+async def tracker(tmp_path: Path) -> DownloadTracker:
+    """Provide an open tracker with an in-memory-like temp DB."""
+    db_path = tmp_path / ".tumblr-dl.db"
+    t = DownloadTracker(db_path)
+    await t.open()
+    yield t  # type: ignore[misc]
+    await t.close()
 
 
 @pytest.fixture

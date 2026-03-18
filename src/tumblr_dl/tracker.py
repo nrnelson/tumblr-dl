@@ -8,6 +8,7 @@ from typing import Any
 
 import aiosqlite
 
+from tumblr_dl.exceptions import ConfigError
 from tumblr_dl.models import BlogState, PostMetadata
 
 logger = logging.getLogger(__name__)
@@ -117,13 +118,27 @@ class DownloadTracker:
                 f"re-download, or wait for a future release with "
                 f"migration support."
             )
-            raise RuntimeError(msg)
+            raise ConfigError(
+                msg,
+                context={
+                    "db_path": str(self._db_path),
+                    "db_version": version,
+                    "required_version": _SCHEMA_VERSION,
+                },
+            )
         elif version > _SCHEMA_VERSION:
             msg = (
                 f"Database schema v{version} is newer than supported "
                 f"v{_SCHEMA_VERSION}. Please upgrade tumblr-dl."
             )
-            raise RuntimeError(msg)
+            raise ConfigError(
+                msg,
+                context={
+                    "db_path": str(self._db_path),
+                    "db_version": version,
+                    "supported_version": _SCHEMA_VERSION,
+                },
+            )
 
         logger.debug(
             "Opened tracker database: %s (schema v%d)", self._db_path, _SCHEMA_VERSION

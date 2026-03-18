@@ -4,11 +4,9 @@ from __future__ import annotations
 
 from typing import Any
 
+from tests.conftest import _TUMBLR_MEDIA
 from tumblr_dl.extractors import extract_media, extract_post_metadata
 from tumblr_dl.models import MediaType
-
-_TUMBLR_MEDIA = "https://64.media.tumblr.com"
-
 
 # --- extract_post_metadata: tags ---
 
