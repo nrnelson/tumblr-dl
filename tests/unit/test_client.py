@@ -2,67 +2,22 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-import yaml
 
-from tumblr_dl.client import TumblrClient, _normalize_blog_name, load_config
-from tumblr_dl.exceptions import ApiError, ConfigError
+from tumblr_dl.client import TumblrClient, _normalize_blog_name
+from tumblr_dl.config import AuthCredentials
+from tumblr_dl.exceptions import ApiError
 from tumblr_dl.ratelimit import AsyncRateLimiter
 
-# --- load_config tests ---
-
-
-def test_load_config_success(tmp_path: Path) -> None:
-    """Load valid config returns the four OAuth keys."""
-    config = {
-        "consumer_key": "ck",
-        "consumer_secret": "cs",
-        "oauth_token": "ot",
-        "oauth_token_secret": "os",
-    }
-    config_file = tmp_path / ".tumblr"
-    config_file.write_text(yaml.dump(config))
-
-    result = load_config(config_file)
-
-    assert result == config
-
-
-def test_load_config_file_not_found(tmp_path: Path) -> None:
-    """Missing config file raises ConfigError with path context."""
-    missing = tmp_path / "nope.yaml"
-
-    with pytest.raises(ConfigError, match="Config file not found") as exc_info:
-        load_config(missing)
-
-    assert str(missing) in exc_info.value.context["path"]
-
-
-def test_load_config_invalid_yaml(tmp_path: Path) -> None:
-    """Malformed YAML raises ConfigError."""
-    bad_file = tmp_path / ".tumblr"
-    bad_file.write_text("{{invalid: yaml: [")
-
-    with pytest.raises(ConfigError, match="Invalid YAML"):
-        load_config(bad_file)
-
-
-def test_load_config_missing_keys(tmp_path: Path) -> None:
-    """Config missing required keys raises ConfigError listing them."""
-    config_file = tmp_path / ".tumblr"
-    config_file.write_text(yaml.dump({"consumer_key": "ck"}))
-
-    with pytest.raises(ConfigError, match="Missing keys") as exc_info:
-        load_config(config_file)
-
-    missing = exc_info.value.context["missing_keys"]
-    assert "consumer_secret" in missing
-    assert "oauth_token" in missing
-    assert "oauth_token_secret" in missing
+_TEST_AUTH = AuthCredentials(
+    consumer_key="ck",
+    consumer_secret="cs",
+    oauth_token="ot",
+    oauth_token_secret="os",
+)
 
 
 # --- _normalize_blog_name tests ---
@@ -84,19 +39,6 @@ def test_normalize_custom_domain() -> None:
 
 
 # --- TumblrClient helpers ---
-
-
-def _make_config_file(tmp_path: Path) -> Path:
-    """Create a valid config file and return its path."""
-    config = {
-        "consumer_key": "ck",
-        "consumer_secret": "cs",
-        "oauth_token": "ot",
-        "oauth_token_secret": "os",
-    }
-    config_file = tmp_path / ".tumblr"
-    config_file.write_text(yaml.dump(config))
-    return config_file
 
 
 def _make_mock_response(json_data: dict[str, Any], status_code: int = 200) -> MagicMock:
@@ -185,16 +127,14 @@ async def test_get_posts_missing_posts_key() -> None:
 
 
 @pytest.mark.asyncio
-async def test_client_context_manager(tmp_path: Path) -> None:
+async def test_client_context_manager() -> None:
     """Async context manager calls close on exit."""
-    config_file = _make_config_file(tmp_path)
-
     with patch("tumblr_dl.client.AsyncSession") as mock_session_cls:
         mock_session = MagicMock()
         mock_session.close = AsyncMock()
         mock_session_cls.return_value = mock_session
 
-        async with TumblrClient(config_file) as client:
+        async with TumblrClient(_TEST_AUTH) as client:
             assert client is not None
 
         mock_session.close.assert_awaited_once()

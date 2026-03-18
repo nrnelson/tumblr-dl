@@ -4,67 +4,23 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from pathlib import Path
 from typing import Any
 
-import yaml
 from curl_cffi.requests import AsyncSession
 from oauthlib.oauth1 import Client as OAuth1Client
 
-from tumblr_dl.exceptions import ApiError, ConfigError
+from tumblr_dl.config import AuthCredentials
+from tumblr_dl.exceptions import ApiError
 from tumblr_dl.ratelimit import AsyncRateLimiter
 
 logger = logging.getLogger(__name__)
 
 _API_BASE = "https://api.tumblr.com/v2"
 
-_REQUIRED_KEYS = (
-    "consumer_key",
-    "consumer_secret",
-    "oauth_token",
-    "oauth_token_secret",
-)
-
 # 429 retry: exponential backoff starting at 30s, max 5 min, 4 attempts.
 _RETRY_MAX_ATTEMPTS = 4
 _RETRY_BASE_DELAY = 30.0
 _RETRY_MAX_DELAY = 300.0
-
-
-def load_config(config_path: str | Path) -> dict[str, str]:
-    """Load OAuth credentials from a YAML config file.
-
-    Args:
-        config_path: Path to the YAML file (supports ~ expansion).
-
-    Returns:
-        Dict with the four required OAuth credential keys.
-
-    Raises:
-        ConfigError: If the file is missing or keys are absent.
-    """
-    path = Path(config_path).expanduser()
-    try:
-        data = yaml.safe_load(path.read_text())
-    except FileNotFoundError as exc:
-        raise ConfigError(
-            f"Config file not found: {path}",
-            context={"path": str(path)},
-        ) from exc
-    except yaml.YAMLError as exc:
-        raise ConfigError(
-            f"Invalid YAML in config: {path}",
-            context={"path": str(path)},
-        ) from exc
-
-    missing = [k for k in _REQUIRED_KEYS if k not in data]
-    if missing:
-        raise ConfigError(
-            f"Missing keys in config: {', '.join(missing)}",
-            context={"path": str(path), "missing_keys": missing},
-        )
-
-    return {k: data[k] for k in _REQUIRED_KEYS}
 
 
 def _normalize_blog_name(blog_name: str) -> str:
@@ -89,26 +45,25 @@ class TumblrClient:
     rate limiter (300 calls/min) and 429 backoff/retry.
 
     Args:
-        config_path: Path to YAML OAuth credentials file.
+        auth: Pre-resolved OAuth credentials.
         rate_limit: Maximum API calls per minute (default: 300).
 
     Usage::
 
-        async with TumblrClient("~/.tumblr") as client:
+        async with TumblrClient(auth) as client:
             posts = await client.get_posts("blogname")
     """
 
     def __init__(
         self,
-        config_path: str | Path,
+        auth: AuthCredentials,
         rate_limit: int = 300,
     ) -> None:
-        creds = load_config(config_path)
         self._oauth = OAuth1Client(
-            creds["consumer_key"],
-            client_secret=creds["consumer_secret"],
-            resource_owner_key=creds["oauth_token"],
-            resource_owner_secret=creds["oauth_token_secret"],
+            auth.consumer_key,
+            client_secret=auth.consumer_secret,
+            resource_owner_key=auth.oauth_token,
+            resource_owner_secret=auth.oauth_token_secret,
         )
         self._session: AsyncSession = AsyncSession()  # type: ignore[type-arg]
         self._limiter = AsyncRateLimiter(max_calls=rate_limit, period=60.0)

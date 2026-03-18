@@ -10,7 +10,17 @@ import sys
 import time
 from pathlib import Path
 
+from dotenv import load_dotenv
+
 from tumblr_dl.client import TumblrClient
+from tumblr_dl.config import (
+    AppConfig,
+    BlogConfig,
+    load_auth,
+    load_toml_config,
+    resolve_blog_config,
+    resolve_config_path,
+)
 from tumblr_dl.downloader import (
     DedupStrategy,
     FilesystemDedup,
@@ -51,23 +61,23 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "blog_names",
         nargs="*",
-        help="One or more Tumblr blog names (e.g. 'blog1 blog2'). Optional with --tag.",
+        help="One or more Tumblr blog names. Optional with --tag or --sync.",
     )
     parser.add_argument(
         "--output-dir",
         "-o",
-        default="tumblr_downloads",
+        default=None,
         help="Directory to save downloaded media (default: tumblr_downloads/)",
     )
     parser.add_argument(
         "--config",
-        default="~/.tumblr",
-        help="Path to YAML OAuth config file (default: ~/.tumblr)",
+        default=None,
+        help="Path to TOML config file (default: auto-discovered via XDG)",
     )
     parser.add_argument(
         "--start-post",
         type=int,
-        default=0,
+        default=None,
         help="Post offset to start from (default: 0)",
     )
     parser.add_argument(
@@ -84,16 +94,19 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--no-db",
         action="store_true",
+        default=None,
         help="Disable SQLite tracking; use filesystem-only dedup",
     )
     parser.add_argument(
         "--full-scan",
         action="store_true",
+        default=None,
         help="Ignore stored cursor; scan the entire blog",
     )
     parser.add_argument(
         "--retry-failed",
         action="store_true",
+        default=None,
         help="Re-download previously failed items before main scan",
     )
     parser.add_argument(
@@ -110,6 +123,11 @@ def _build_parser() -> argparse.ArgumentParser:
         "--exclude-blogs",
         default=None,
         help="Comma-separated glob patterns of blog names to exclude",
+    )
+    parser.add_argument(
+        "--sync",
+        action="store_true",
+        help="Download all blogs defined in the TOML config file",
     )
     parser.add_argument(
         "--debug",
@@ -134,10 +152,12 @@ def _configure_logging(debug: bool) -> None:
     pkg_logger.setLevel(logging.DEBUG if debug else logging.INFO)
 
 
-def _parse_exclude_patterns(raw: str | None) -> list[str]:
-    """Parse comma-separated exclude tag patterns to lowercase list."""
+def _parse_exclude_patterns(raw: str | list[str] | None) -> list[str]:
+    """Parse exclude patterns from CLI string or config list to lowercase list."""
     if not raw:
         return []
+    if isinstance(raw, list):
+        return [p.strip().lower() for p in raw if p.strip()]
     return [p.strip().lower() for p in raw.split(",") if p.strip()]
 
 
@@ -171,6 +191,36 @@ def _collect_trail_blogs(metadata: PostMetadata) -> list[str]:
         if entry.blog_name:
             blogs.append(entry.blog_name.lower())
     return blogs
+
+
+def _cli_overrides(args: argparse.Namespace) -> dict[str, object]:
+    """Extract CLI flag values as a dict for config merging.
+
+    Only includes values that were explicitly provided (not None).
+    Converts --exclude-tags/--exclude-blogs from CSV to lists.
+    """
+    overrides: dict[str, object] = {}
+    if args.output_dir is not None:
+        overrides["output_dir"] = args.output_dir
+    if args.max_posts is not None:
+        overrides["max_posts"] = args.max_posts
+    if args.start_post is not None:
+        overrides["start_post"] = args.start_post
+    if args.db_path is not None:
+        overrides["db_path"] = args.db_path
+    if args.no_db is not None:
+        overrides["no_db"] = args.no_db
+    if args.full_scan is not None:
+        overrides["full_scan"] = args.full_scan
+    if args.retry_failed is not None:
+        overrides["retry_failed"] = args.retry_failed
+    if args.tag is not None:
+        overrides["tag"] = args.tag
+    if args.exclude_tags is not None:
+        overrides["exclude_tags"] = _parse_exclude_patterns(args.exclude_tags)
+    if args.exclude_blogs is not None:
+        overrides["exclude_blogs"] = _parse_exclude_patterns(args.exclude_blogs)
+    return overrides
 
 
 async def _retry_failed_downloads(
@@ -361,10 +411,13 @@ async def _download_blog(
         offset += _BATCH_SIZE
 
     # Update the cursor with the high-water mark from this run.
-    if tracker and run_highest_id > 0:
+    # Always update last_run_at so we know when we last checked,
+    # even if there was no new content.
+    if tracker:
         new_highest = max(run_highest_id, highest_known_id)
+        new_ts = max(run_newest_ts, last_known_ts)
         await tracker.update_blog_state(
-            blog_name, new_highest, run_newest_ts, stats.posts_processed
+            blog_name, new_highest, new_ts, stats.posts_processed
         )
         logger.debug("Updated blog cursor: highest_post_id=%d", new_highest)
 
@@ -503,97 +556,222 @@ def _merge_stats(target: DownloadStats, source: DownloadStats) -> None:
     target.posts_processed += source.posts_processed
 
 
+async def _run_blog_download(
+    client: TumblrClient,
+    blog_name: str,
+    blog_config: BlogConfig,
+    tracker: DownloadTracker | None,
+    dedup: DedupStrategy,
+) -> DownloadStats:
+    """Run a single blog download using resolved BlogConfig."""
+    output_dir = Path(blog_config.output_dir).expanduser()
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    exclude_patterns = _parse_exclude_patterns(blog_config.exclude_tags)
+    exclude_blog_patterns = _parse_exclude_patterns(blog_config.exclude_blogs)
+
+    retry_stats = DownloadStats()
+    if blog_config.retry_failed and tracker:
+        await _retry_failed_downloads(
+            tracker, blog_name, output_dir, dedup, retry_stats
+        )
+
+    if blog_config.tag:
+        blog_stats = await _download_tagged(
+            client=client,
+            tag=blog_config.tag,
+            output_dir=output_dir,
+            dedup=dedup,
+            tracker=tracker,
+            max_posts=blog_config.max_posts,
+            exclude_patterns=exclude_patterns,
+            exclude_blog_patterns=exclude_blog_patterns,
+        )
+    else:
+        blog_stats = await _download_blog(
+            client=client,
+            blog_name=blog_name,
+            output_dir=output_dir,
+            dedup=dedup,
+            tracker=tracker,
+            start_offset=blog_config.start_post,
+            max_posts=blog_config.max_posts,
+            full_scan=blog_config.full_scan,
+            exclude_patterns=exclude_patterns,
+            exclude_blog_patterns=exclude_blog_patterns,
+        )
+
+    _merge_stats(blog_stats, retry_stats)
+    return blog_stats
+
+
+async def _setup_tracker_and_dedup(
+    blog_config: BlogConfig,
+) -> tuple[DownloadTracker | None, DedupStrategy]:
+    """Create tracker and dedup strategy from config."""
+    if blog_config.no_db:
+        return None, FilesystemDedup()
+
+    output_dir = Path(blog_config.output_dir).expanduser()
+    db_path = Path(
+        blog_config.db_path if blog_config.db_path else output_dir / ".tumblr-dl.db"
+    )
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    tracker = DownloadTracker(db_path)
+    await tracker.open()
+    return tracker, SqliteDedup(tracker)
+
+
 async def _run(args: argparse.Namespace) -> int:
     """Execute the download workflow. Returns exit code."""
     _configure_logging(args.debug)
 
-    # Validate arguments.
-    blog_names: list[str] = args.blog_names or []
-    if not args.tag and not blog_names:
+    # Load .env file if present.
+    load_dotenv()
+
+    # Load TOML config.
+    config_path = Path(args.config) if args.config else resolve_config_path()
+    app_config: AppConfig | None = None
+    if config_path:
+        app_config = load_toml_config(config_path)
+
+    overrides = _cli_overrides(args)
+
+    # Handle --sync flag.
+    if args.sync:
+        if not app_config or not app_config.blogs:
+            logger.error(
+                "No blogs configured. Add [blog.*] sections to your config.toml."
+            )
+            return _EXIT_CONFIG
+
+        auth = load_auth(app_config)
+        start_time = time.monotonic()
+
+        try:
+            async with TumblrClient(auth) as client:
+                total_stats = DownloadStats()
+                blog_names = list(app_config.blogs.keys())
+
+                for i, blog_name in enumerate(blog_names):
+                    blog_config = resolve_blog_config(blog_name, app_config, overrides)
+
+                    if len(blog_names) > 1:
+                        logger.info(
+                            "--- Blog %d/%d: %s ---",
+                            i + 1,
+                            len(blog_names),
+                            blog_name,
+                        )
+
+                    logger.info(
+                        "Starting download from %s to %s",
+                        blog_name,
+                        blog_config.output_dir,
+                    )
+
+                    tracker, dedup = await _setup_tracker_and_dedup(blog_config)
+                    try:
+                        blog_stats = await _run_blog_download(
+                            client, blog_name, blog_config, tracker, dedup
+                        )
+                    finally:
+                        if tracker:
+                            await tracker.close()
+
+                    if len(blog_names) > 1:
+                        logger.info(
+                            "  %s: %d posts, %d downloaded",
+                            blog_name,
+                            blog_stats.posts_processed,
+                            sum(blog_stats.downloaded.values()),
+                        )
+
+                    _merge_stats(total_stats, blog_stats)
+
+                total_stats.api_calls = client.api_calls
+                total_stats.rate_limit = client._rate_limit
+
+        except ConfigError as exc:
+            logger.error("%s", exc)
+            return _EXIT_CONFIG
+        except TumblrDlError as exc:
+            logger.error("API error: %s", exc)
+            return _EXIT_RUNTIME
+
+        total_stats.elapsed_seconds = time.monotonic() - start_time
+        logger.info("\n%s", total_stats.summary())
+        return _EXIT_OK
+
+    # Ad-hoc mode: blog names from CLI.
+    blog_names_cli: list[str] = args.blog_names or []
+    tag = overrides.get("tag") or (app_config.defaults.tag if app_config else None)
+
+    if not tag and not blog_names_cli:
         logger.error("At least one blog_name is required unless --tag is specified.")
         return _EXIT_CONFIG
 
-    output_dir = Path(args.output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    exclude_patterns = _parse_exclude_patterns(args.exclude_tags)
-    exclude_blog_patterns = _parse_exclude_patterns(args.exclude_blogs)
+    # Resolve config for the first blog (or defaults for tag mode).
+    first_blog = blog_names_cli[0] if blog_names_cli else "__tag_search__"
+    base_config = resolve_blog_config(first_blog, app_config, overrides)
 
     start_time = time.monotonic()
 
     try:
-        async with TumblrClient(args.config) as client:
-            # Set up tracker and dedup strategy.
-            if args.no_db:
-                tracker = None
-                dedup: DedupStrategy = FilesystemDedup()
-            else:
-                db_path = Path(
-                    args.db_path if args.db_path else output_dir / ".tumblr-dl.db"
-                )
-                tracker = DownloadTracker(db_path)
-                await tracker.open()
-                dedup = SqliteDedup(tracker)
+        auth = load_auth(app_config)
+        async with TumblrClient(auth) as client:
+            tracker, dedup = await _setup_tracker_and_dedup(base_config)
 
             try:
                 total_stats = DownloadStats()
 
-                if args.tag:
-                    # Tag search mode.
+                if tag:
+                    output_dir = Path(base_config.output_dir).expanduser()
+                    output_dir.mkdir(parents=True, exist_ok=True)
+                    exclude_patterns = _parse_exclude_patterns(base_config.exclude_tags)
+                    exclude_blog_patterns = _parse_exclude_patterns(
+                        base_config.exclude_blogs
+                    )
+
                     logger.info(
                         "Starting tag search for '%s' to %s",
-                        args.tag,
+                        tag,
                         output_dir,
                     )
                     total_stats = await _download_tagged(
                         client=client,
-                        tag=args.tag,
+                        tag=str(tag),
                         output_dir=output_dir,
                         dedup=dedup,
                         tracker=tracker,
-                        max_posts=args.max_posts,
+                        max_posts=base_config.max_posts,
                         exclude_patterns=exclude_patterns,
                         exclude_blog_patterns=exclude_blog_patterns,
                     )
                 else:
-                    # Blog download mode — process each blog sequentially.
-                    for i, blog_name in enumerate(blog_names):
-                        if len(blog_names) > 1:
+                    for i, blog_name in enumerate(blog_names_cli):
+                        blog_config = resolve_blog_config(
+                            blog_name, app_config, overrides
+                        )
+
+                        if len(blog_names_cli) > 1:
                             logger.info(
                                 "--- Blog %d/%d: %s ---",
                                 i + 1,
-                                len(blog_names),
+                                len(blog_names_cli),
                                 blog_name,
                             )
                         logger.info(
                             "Starting download from %s to %s",
                             blog_name,
-                            output_dir,
+                            blog_config.output_dir,
                         )
 
-                        retry_stats = DownloadStats()
-                        if args.retry_failed and tracker:
-                            await _retry_failed_downloads(
-                                tracker, blog_name, output_dir, dedup, retry_stats
-                            )
-
-                        blog_stats = await _download_blog(
-                            client=client,
-                            blog_name=blog_name,
-                            output_dir=output_dir,
-                            dedup=dedup,
-                            tracker=tracker,
-                            start_offset=args.start_post,
-                            max_posts=args.max_posts,
-                            full_scan=args.full_scan,
-                            exclude_patterns=exclude_patterns,
-                            exclude_blog_patterns=exclude_blog_patterns,
+                        blog_stats = await _run_blog_download(
+                            client, blog_name, blog_config, tracker, dedup
                         )
 
-                        # Merge retry stats into this blog's stats.
-                        _merge_stats(blog_stats, retry_stats)
-
-                        if len(blog_names) > 1:
+                        if len(blog_names_cli) > 1:
                             logger.info(
                                 "  %s: %d posts, %d downloaded",
                                 blog_name,
@@ -601,7 +779,6 @@ async def _run(args: argparse.Namespace) -> int:
                                 sum(blog_stats.downloaded.values()),
                             )
 
-                        # Accumulate into total.
                         _merge_stats(total_stats, blog_stats)
 
             finally:

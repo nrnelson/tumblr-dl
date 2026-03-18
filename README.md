@@ -5,6 +5,8 @@ A CLI tool for downloading media (images, videos, audio) from Tumblr blogs using
 ## Features
 
 - Downloads images, videos, and audio from any Tumblr blog
+- **TOML config file** — define blogs, exclusions, and defaults in `~/.config/tumblr-dl/config.toml`
+- **`sync` command** — download all configured blogs in one shot
 - **Tag-based search** — search and download from any Tumblr tag (e.g. `--tag landscape`)
 - **Rich metadata capture** — stores post URLs, tags, reblog trails, content labels, and timestamps in SQLite
 - **Reblog trail tracking** — captures the full reblog chain from original poster to current reblogger
@@ -22,7 +24,7 @@ A CLI tool for downloading media (images, videos, audio) from Tumblr blogs using
 
 ## Requirements
 
-- Python 3.10+
+- Python 3.11+
 - Tumblr API OAuth credentials ([register an app here](https://www.tumblr.com/oauth/apps))
 
 ## Installation
@@ -37,26 +39,91 @@ pip install -e .
 
 ## Configuration
 
-Create a `~/.tumblr` file with your Tumblr API OAuth credentials in YAML format:
+### Authentication
 
-```yaml
-consumer_key: your_consumer_key
-consumer_secret: your_consumer_secret
-oauth_token: your_oauth_token
-oauth_token_secret: your_oauth_token_secret
-```
+tumblr-dl loads OAuth credentials in priority order:
 
-To obtain these credentials:
+1. **Environment variables** (recommended):
+   ```bash
+   export TUMBLR_CONSUMER_KEY=your_consumer_key
+   export TUMBLR_CONSUMER_SECRET=your_consumer_secret
+   export TUMBLR_OAUTH_TOKEN=your_oauth_token
+   export TUMBLR_OAUTH_TOKEN_SECRET=your_oauth_token_secret
+   ```
+
+   You can also use a `.env` file in the working directory (loaded automatically).
+
+2. **TOML config file** `[auth]` section (see below).
+
+To obtain credentials:
 
 1. Register an application at https://www.tumblr.com/oauth/apps
 2. Note the **Consumer Key** and **Consumer Secret**
 3. Use the [Tumblr API console](https://api.tumblr.com/console/calls/user/info) to complete the OAuth flow and get your **OAuth Token** and **OAuth Token Secret**
 
+### Config File
+
+Create `~/.config/tumblr-dl/config.toml` (or set `XDG_CONFIG_HOME`):
+
+```toml
+[auth]
+consumer_key = "your_consumer_key"
+consumer_secret = "your_consumer_secret"
+oauth_token = "your_oauth_token"
+oauth_token_secret = "your_oauth_token_secret"
+
+# Global defaults — apply to all blogs unless overridden
+[defaults]
+output_dir = "tumblr_downloads"
+exclude_tags = ["gore*", "explicit"]
+exclude_blogs = ["spambot*"]
+
+# Per-blog sections
+[blog.myblog]
+output_dir = "~/media/myblog"
+exclude_tags = ["nsfw"]
+max_posts = 500
+
+[blog.otherblog]
+output_dir = "~/media/otherblog"
+full_scan = true
+
+[blog.tagwatch]
+tag = "photography"
+output_dir = "~/media/photography"
+max_posts = 200
+```
+
+All per-blog keys are optional and inherit from `[defaults]`:
+
+| Key | Type | Description |
+|-----|------|-------------|
+| `output_dir` | string | Directory to save media |
+| `exclude_tags` | list | Glob patterns to skip by tag |
+| `exclude_blogs` | list | Glob patterns to skip by reblog source |
+| `max_posts` | integer | Stop after N posts |
+| `start_post` | integer | Post offset to start from |
+| `tag` | string | Download by tag search instead of blog |
+| `full_scan` | boolean | Ignore stored cursor |
+| `retry_failed` | boolean | Re-download failed items |
+| `no_db` | boolean | Disable SQLite tracking |
+| `db_path` | string | Custom SQLite database path |
+
 ## Usage
+
+### Ad-hoc downloads
 
 ```bash
 tumblr-dl <blog_name> [blog_name ...] [options]
 ```
+
+### Sync all configured blogs
+
+```bash
+tumblr-dl sync
+```
+
+Runs all `[blog.*]` sections from your config file. CLI flags override config values.
 
 ### Arguments
 
@@ -69,7 +136,7 @@ tumblr-dl <blog_name> [blog_name ...] [options]
 | Option | Default | Description |
 |--------|---------|-------------|
 | `-o`, `--output-dir DIR` | `tumblr_downloads/` | Directory to save downloaded media |
-| `--config PATH` | `~/.tumblr` | Path to YAML OAuth config file |
+| `--config PATH` | auto-discovered | Path to TOML config file |
 | `--start-post N` | `0` | Post offset to start downloading from |
 | `--max-posts N` | *(all)* | Maximum number of posts to process |
 | `--db-path PATH` | `<output_dir>/.tumblr-dl.db` | SQLite database location |
@@ -80,6 +147,8 @@ tumblr-dl <blog_name> [blog_name ...] [options]
 | `--exclude-tags PATTERNS` | off | Comma-separated glob patterns to exclude (e.g. `nsfw,explicit*`) |
 | `--exclude-blogs PATTERNS` | off | Comma-separated glob patterns of blog names to skip in reblog trails |
 | `--debug` | off | Enable debug logging |
+
+CLI flags override values from the config file when explicitly provided.
 
 ### Examples
 
@@ -107,10 +176,16 @@ Download the first 100 posts with debug output:
 tumblr-dl myblog --max-posts 100 --debug
 ```
 
-Resume from post offset 200 with a custom config file:
+Sync all configured blogs from config.toml:
 
 ```bash
-tumblr-dl myblog --start-post 200 --config ~/my-creds.yaml
+tumblr-dl sync
+```
+
+Sync with a CLI override:
+
+```bash
+tumblr-dl sync --max-posts 50
 ```
 
 Re-run and only fetch new posts (automatic — just run the same command again):
@@ -180,7 +255,7 @@ tumblr-dl --tag photography --exclude-tags "ai*,generated" --exclude-blogs "spam
 | Code | Meaning |
 |------|---------|
 | `0` | Success |
-| `2` | Configuration error (missing config file or keys) |
+| `2` | Configuration error (missing credentials or invalid config) |
 | `3` | Runtime error (API failure) |
 
 ## Supported Post Types
@@ -287,6 +362,7 @@ src/tumblr_dl/
 ├── __init__.py        — package + version
 ├── cli.py             — async argparse + main() entry point
 ├── client.py          — async TumblrClient (OAuth1 + Tumblr API v2)
+├── config.py          — TOML config + env var auth loading
 ├── downloader.py      — async download_item() with DedupStrategy ABC
 ├── exceptions.py      — TumblrDlError hierarchy
 ├── extractors.py      — media URL extraction per post type

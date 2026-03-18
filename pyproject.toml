@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "tumblr-dl"
 version = "0.2.0"
 description = "CLI tool for downloading media from Tumblr blogs via the Tumblr API v2"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 license = { text = "MIT" }
 authors = [
     { name = "Nathan Nelson", email = "nrnelson@gmail.com" },
@@ -16,7 +16,7 @@ dependencies = [
     "curl_cffi>=0.14,<1.0",
     "oauthlib>=3.2,<4.0",
     "beautifulsoup4>=4.12,<5.0",
-    "pyyaml>=6.0,<7.0",
+    "python-dotenv>=1.0,<2.0",
     "aiosqlite>=0.20,<1.0",
 ]
 
@@ -34,7 +34,6 @@ dev = [
     "pytest-asyncio>=0.24",
     "pre-commit>=3.0",
     "types-oauthlib>=3.2",
-    "types-PyYAML>=6.0",
     "types-beautifulsoup4>=4.12",
 ]
 
