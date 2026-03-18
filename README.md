@@ -19,7 +19,7 @@ A CLI tool for downloading media (images, videos, audio) from Tumblr blogs using
 - Resumable — start from any post offset
 - Paginates automatically through all blog posts
 - Re-download previously failed items with `--retry-failed`
-- Sanitizes filenames for cross-platform compatibility (post-ID prefixed to prevent collisions)
+- Sanitizes filenames for cross-platform compatibility
 - Prints a summary of found/downloaded/skipped/failed files by type
 
 ## Requirements
