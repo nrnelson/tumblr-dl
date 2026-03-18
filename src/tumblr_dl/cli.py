@@ -150,6 +150,13 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Write logs to this file (implies debug-level file logging)",
     )
+    parser.add_argument(
+        "--max-concurrent",
+        "-j",
+        type=int,
+        default=None,
+        help="Max concurrent downloads (default: 4, max: 32)",
+    )
     return parser
 
 
@@ -261,27 +268,22 @@ def _collect_trail_blogs(metadata: PostMetadata) -> list[str]:
 async def _process_post(
     post: dict[str, Any],
     blog_name: str,
-    output_dir: Path,
-    dedup: DedupStrategy,
     tracker: DownloadTracker | None,
-    stats: DownloadStats,
     exclude_patterns: list[str] | None,
     exclude_blog_patterns: list[str] | None,
-) -> bool:
-    """Process a single post: check exclusions, extract media, download.
+) -> tuple[bool, list[MediaItem]]:
+    """Check exclusions, record metadata, and extract media items.
 
     Args:
         post: Raw post dict from the Tumblr API.
         blog_name: Blog the post belongs to (for logging and exclusion).
-        output_dir: Directory to save files into.
-        dedup: Duplicate detection strategy.
         tracker: Optional SQLite tracker.
-        stats: Stats object to record results into.
         exclude_patterns: Tag glob patterns to skip.
         exclude_blog_patterns: Blog glob patterns to skip.
 
     Returns:
-        True if the post was processed, False if excluded.
+        Tuple of (was_processed, media_items). If excluded, returns
+        (False, []). Otherwise returns (True, extracted_items).
     """
     post_id: int = post["id"]
     metadata = extract_post_metadata(post, blog_name)
@@ -302,7 +304,7 @@ async def _process_post(
                 await tracker.record_skipped_post(
                     blog_name, post_id, "tag_exclusion", matched
                 )
-            return False
+            return False, []
 
     # Blog exclusion check — skip if any blog in the reblog trail matches.
     if exclude_blog_patterns:
@@ -318,17 +320,31 @@ async def _process_post(
                 await tracker.record_skipped_post(
                     blog_name, post_id, "blog_exclusion", matched_blog
                 )
-            return False
+            return False, []
 
-    for item in extract_media(post, blog_name, metadata=metadata):
-        try:
-            status = await download_item(item, output_dir, dedup)
-        except DownloadError as exc:
-            logger.warning("%s", exc)
-            status = DownloadStatus.FAILED
-        stats.record(item.media_type, status)
+    items = list(extract_media(post, blog_name, metadata=metadata))
+    return True, items
 
-    return True
+
+async def _download_items_concurrent(
+    items: list[MediaItem],
+    output_dir: Path,
+    dedup: DedupStrategy,
+    stats: DownloadStats,
+    semaphore: asyncio.Semaphore,
+) -> None:
+    """Download media items concurrently, gated by semaphore."""
+
+    async def _do_one(item: MediaItem) -> None:
+        async with semaphore:
+            try:
+                status = await download_item(item, output_dir, dedup)
+            except DownloadError as exc:
+                logger.warning("%s", exc)
+                status = DownloadStatus.FAILED
+            stats.record(item.media_type, status)
+
+    await asyncio.gather(*[_do_one(item) for item in items])
 
 
 def _cli_overrides(args: argparse.Namespace) -> dict[str, object]:
@@ -367,6 +383,7 @@ async def _retry_failed_downloads(
     output_dir: Path,
     dedup: DedupStrategy,
     stats: DownloadStats,
+    semaphore: asyncio.Semaphore,
 ) -> None:
     """Re-attempt previously failed downloads.
 
@@ -376,26 +393,23 @@ async def _retry_failed_downloads(
         output_dir: Directory to save files into.
         dedup: Duplicate detection strategy.
         stats: Stats object to record results into.
+        semaphore: Concurrency limiter for parallel downloads.
     """
     failed = await tracker.get_failed_downloads(blog_name)
     if not failed:
         return
 
     logger.info("Retrying %d previously failed download(s)...", len(failed))
-    for record in failed:
-        media_type = MediaType(record["media_type"])
-        item = MediaItem(
+    items = [
+        MediaItem(
             url=record["url"],
             post_id=record["post_id"],
-            media_type=media_type,
+            media_type=MediaType(record["media_type"]),
             blog_name=blog_name,
         )
-        try:
-            status = await download_item(item, output_dir, dedup)
-        except DownloadError as exc:
-            logger.warning("Retry failed: %s", exc)
-            status = DownloadStatus.FAILED
-        stats.record(media_type, status)
+        for record in failed
+    ]
+    await _download_items_concurrent(items, output_dir, dedup, stats, semaphore)
 
 
 async def _download_blog(
@@ -403,6 +417,7 @@ async def _download_blog(
     blog_name: str,
     output_dir: Path,
     dedup: DedupStrategy,
+    semaphore: asyncio.Semaphore,
     tracker: DownloadTracker | None = None,
     start_offset: int = 0,
     max_posts: int | None = None,
@@ -417,6 +432,7 @@ async def _download_blog(
         blog_name: Blog to download from.
         output_dir: Directory to save files into.
         dedup: Duplicate detection strategy.
+        semaphore: Concurrency limiter for parallel downloads.
         tracker: Optional SQLite tracker for incremental sync.
         start_offset: Post offset to begin at.
         max_posts: Stop after processing this many posts.
@@ -456,6 +472,8 @@ async def _download_blog(
             logger.info("No more posts found for %s.", blog_name)
             break
 
+        # Phase 1: Extract media items from all posts in batch (sequential).
+        batch_items: list[MediaItem] = []
         for post in posts:
             post_id: int = post["id"]
             post_ts: int = post.get("timestamp", 0)
@@ -485,16 +503,14 @@ async def _download_blog(
                 post.get("type", "unknown"),
             )
 
-            await _process_post(
+            processed, items = await _process_post(
                 post,
                 blog_name,
-                output_dir,
-                dedup,
                 tracker,
-                stats,
                 exclude_patterns,
                 exclude_blog_patterns,
             )
+            batch_items.extend(items)
 
             if max_posts and stats.posts_processed >= max_posts:
                 logger.info(
@@ -502,6 +518,11 @@ async def _download_blog(
                     max_posts,
                 )
                 break
+
+        # Phase 2: Download all batch items concurrently.
+        await _download_items_concurrent(
+            batch_items, output_dir, dedup, stats, semaphore
+        )
 
         # Flush tracker writes after each pagination batch.
         if tracker:
@@ -533,6 +554,7 @@ async def _download_tagged(
     tag: str,
     output_dir: Path,
     dedup: DedupStrategy,
+    semaphore: asyncio.Semaphore,
     tracker: DownloadTracker | None = None,
     max_posts: int | None = None,
     exclude_patterns: list[str] | None = None,
@@ -547,6 +569,7 @@ async def _download_tagged(
         tag: The tag to search for.
         output_dir: Directory to save files into.
         dedup: Duplicate detection strategy.
+        semaphore: Concurrency limiter for parallel downloads.
         tracker: Optional SQLite tracker for metadata storage.
         max_posts: Stop after processing this many posts.
         exclude_patterns: Tag glob patterns to skip.
@@ -564,6 +587,8 @@ async def _download_tagged(
             logger.info("No more tagged posts found for '%s'.", tag)
             break
 
+        # Phase 1: Extract media items from all posts in batch (sequential).
+        batch_items: list[MediaItem] = []
         for post in posts:
             post_id: int = post["id"]
 
@@ -581,16 +606,14 @@ async def _download_tagged(
                 post.get("type", "unknown"),
             )
 
-            await _process_post(
+            processed, items = await _process_post(
                 post,
                 post_blog,
-                output_dir,
-                dedup,
                 tracker,
-                stats,
                 exclude_patterns,
                 exclude_blog_patterns,
             )
+            batch_items.extend(items)
 
             if max_posts and stats.posts_processed >= max_posts:
                 logger.info(
@@ -598,6 +621,11 @@ async def _download_tagged(
                     max_posts,
                 )
                 break
+
+        # Phase 2: Download all batch items concurrently.
+        await _download_items_concurrent(
+            batch_items, output_dir, dedup, stats, semaphore
+        )
 
         # Flush tracker writes after each pagination batch.
         if tracker:
@@ -634,6 +662,7 @@ async def _run_blog_download(
     blog_config: BlogConfig,
     tracker: DownloadTracker | None,
     dedup: DedupStrategy,
+    semaphore: asyncio.Semaphore,
 ) -> DownloadStats:
     """Run a single blog download using resolved BlogConfig."""
     logger.debug(
@@ -658,7 +687,7 @@ async def _run_blog_download(
     retry_stats = DownloadStats()
     if blog_config.retry_failed and tracker:
         await _retry_failed_downloads(
-            tracker, blog_name, output_dir, dedup, retry_stats
+            tracker, blog_name, output_dir, dedup, retry_stats, semaphore
         )
 
     if blog_config.tag:
@@ -667,6 +696,7 @@ async def _run_blog_download(
             tag=blog_config.tag,
             output_dir=output_dir,
             dedup=dedup,
+            semaphore=semaphore,
             tracker=tracker,
             max_posts=blog_config.max_posts,
             exclude_patterns=exclude_patterns,
@@ -678,6 +708,7 @@ async def _run_blog_download(
             blog_name=blog_name,
             output_dir=output_dir,
             dedup=dedup,
+            semaphore=semaphore,
             tracker=tracker,
             start_offset=blog_config.start_post,
             max_posts=blog_config.max_posts,
@@ -728,10 +759,14 @@ async def _process_blog_list(
     app_config: AppConfig | None,
     overrides: dict[str, Any],
     total_stats: DownloadStats,
+    semaphore: asyncio.Semaphore,
 ) -> None:
     """Download media from a list of blogs, merging stats into *total_stats*."""
     for i, blog_name in enumerate(blog_names):
         blog_config = resolve_blog_config(blog_name, app_config, overrides)
+
+        # Open tracker early so schema errors surface before per-blog logging.
+        tracker, dedup = await _setup_tracker_and_dedup(blog_config)
 
         if len(blog_names) > 1:
             logger.info(
@@ -745,11 +780,9 @@ async def _process_blog_list(
             blog_name,
             blog_config.output_dir,
         )
-
-        tracker, dedup = await _setup_tracker_and_dedup(blog_config)
         try:
             blog_stats = await _run_blog_download(
-                client, blog_name, blog_config, tracker, dedup
+                client, blog_name, blog_config, tracker, dedup, semaphore
             )
         finally:
             if tracker:
@@ -783,6 +816,16 @@ async def _run(args: argparse.Namespace) -> int:
 
     overrides = _cli_overrides(args)
 
+    # Resolve concurrency limit.
+    max_concurrent = args.max_concurrent or settings.max_concurrent
+    if max_concurrent < 1 or max_concurrent > 32:
+        logger.error(
+            "--max-concurrent must be between 1 and 32, got %d.", max_concurrent
+        )
+        return _EXIT_CONFIG
+    semaphore = asyncio.Semaphore(max_concurrent)
+    logger.debug("Max concurrent downloads: %d", max_concurrent)
+
     start_time = time.monotonic()
 
     try:
@@ -804,7 +847,12 @@ async def _run(args: argparse.Namespace) -> int:
                 total_stats = DownloadStats()
                 blog_names = list(app_config.blogs.keys())
                 await _process_blog_list(
-                    client, blog_names, app_config, overrides, total_stats
+                    client,
+                    blog_names,
+                    app_config,
+                    overrides,
+                    total_stats,
+                    semaphore,
                 )
                 total_stats.api_calls = client.api_calls
                 total_stats.rate_limit = client.rate_limit
@@ -862,6 +910,7 @@ async def _run(args: argparse.Namespace) -> int:
                             tag=tag,
                             output_dir=output_dir,
                             dedup=dedup,
+                            semaphore=semaphore,
                             tracker=tracker,
                             max_posts=base_config.max_posts,
                             exclude_patterns=exclude_patterns,
@@ -873,7 +922,12 @@ async def _run(args: argparse.Namespace) -> int:
                 else:
                     # Ad-hoc blog mode: per-blog tracker/dedup to match --sync.
                     await _process_blog_list(
-                        client, blog_names_cli, app_config, overrides, total_stats
+                        client,
+                        blog_names_cli,
+                        app_config,
+                        overrides,
+                        total_stats,
+                        semaphore,
                     )
 
                 total_stats.api_calls = client.api_calls

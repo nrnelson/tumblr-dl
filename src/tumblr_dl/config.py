@@ -56,6 +56,7 @@ class AppSettings:
 
     debug: bool = False
     log_file: str | None = None
+    max_concurrent: int = 4
 
 
 @dataclass
@@ -187,6 +188,20 @@ def _parse_app_settings(data: dict[str, object]) -> AppSettings:
                     context={"key": key, "value": value},
                 )
             settings.log_file = value
+        elif key == "max_concurrent":
+            if not isinstance(value, int) or isinstance(value, bool):
+                raise ConfigError(
+                    f"Config key 'settings.{key}' must be an integer, "
+                    f"got {type(value).__name__}",
+                    context={"key": key, "value": value},
+                )
+            if value < 1 or value > 32:
+                raise ConfigError(
+                    f"Config key 'settings.{key}' must be between 1 and 32, "
+                    f"got {value}",
+                    context={"key": key, "value": value},
+                )
+            settings.max_concurrent = value
         else:
             logger.warning(
                 "Unknown config key '%s' in [settings] section (ignored).",

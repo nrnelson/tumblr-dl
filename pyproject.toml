@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tumblr-dl"
-version = "1.0.0"
+dynamic = ["version"]
 description = "CLI tool for downloading media from Tumblr blogs via the Tumblr API v2"
 requires-python = ">=3.11"
 license = { text = "MIT" }
@@ -51,6 +51,9 @@ dev = [
 
 [project.scripts]
 tumblr-dl = "tumblr_dl.cli:main"
+
+[tool.setuptools.dynamic]
+version = {attr = "tumblr_dl.__version__"}
 
 [tool.setuptools.packages.find]
 where = ["src"]

@@ -10,6 +10,7 @@ from tumblr_dl.config import (
     AppConfig,
     AuthCredentials,
     BlogConfig,
+    _parse_app_settings,
     load_auth,
     load_toml_config,
     resolve_blog_config,
@@ -282,3 +283,38 @@ def test_resolve_blog_config_unknown_blog_uses_defaults() -> None:
     config = resolve_blog_config("otherblog", app, {})
     assert config.output_dir == "media"
     assert config.exclude_tags == ["nsfw"]
+
+
+# --- _parse_app_settings ---
+
+
+def test_parse_app_settings_max_concurrent_valid() -> None:
+    """Valid max_concurrent value is parsed."""
+    settings = _parse_app_settings({"max_concurrent": 8})
+    assert settings.max_concurrent == 8
+
+
+def test_parse_app_settings_max_concurrent_default() -> None:
+    """Default max_concurrent is 4 when not specified."""
+    settings = _parse_app_settings({})
+    assert settings.max_concurrent == 4
+
+
+def test_parse_app_settings_max_concurrent_bounds() -> None:
+    """Out-of-range max_concurrent raises ConfigError."""
+    with pytest.raises(ConfigError, match="between 1 and 32"):
+        _parse_app_settings({"max_concurrent": 0})
+    with pytest.raises(ConfigError, match="between 1 and 32"):
+        _parse_app_settings({"max_concurrent": 33})
+
+
+def test_parse_app_settings_max_concurrent_bad_type() -> None:
+    """Non-integer max_concurrent raises ConfigError."""
+    with pytest.raises(ConfigError, match="must be an integer"):
+        _parse_app_settings({"max_concurrent": "fast"})
+
+
+def test_parse_app_settings_max_concurrent_bool_rejected() -> None:
+    """Boolean is rejected even though bool is subclass of int."""
+    with pytest.raises(ConfigError, match="must be an integer"):
+        _parse_app_settings({"max_concurrent": True})

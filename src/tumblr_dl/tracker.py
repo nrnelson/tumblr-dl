@@ -112,6 +112,8 @@ class DownloadTracker:
             await self._conn.execute(f"PRAGMA user_version={_SCHEMA_VERSION}")
             await self._conn.commit()
         elif version < _SCHEMA_VERSION:
+            await self._conn.close()
+            self._conn = None
             msg = (
                 f"Database schema v{version} is older than required "
                 f"v{_SCHEMA_VERSION}. Please delete the database and "
@@ -127,6 +129,8 @@ class DownloadTracker:
                 },
             )
         elif version > _SCHEMA_VERSION:
+            await self._conn.close()
+            self._conn = None
             msg = (
                 f"Database schema v{version} is newer than supported "
                 f"v{_SCHEMA_VERSION}. Please upgrade tumblr-dl."

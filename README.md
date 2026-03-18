@@ -13,7 +13,7 @@ A CLI tool for downloading media (images, videos, audio) from Tumblr blogs using
 - **Tag exclusion** — skip posts matching glob patterns (e.g. `--exclude-tags "gore*,explicit"`)
 - Extracts embedded images from text and answer posts
 - Extracts video URLs from embedded iframes and NPF data attributes
-- Fully async architecture for non-blocking I/O
+- Fully async with concurrent media downloads (configurable via `--max-concurrent` / `-j`)
 - **Incremental sync** — tracks progress in SQLite; only fetches new posts on subsequent runs
 - Skips already-downloaded files (duplicate detection via DB + filesystem)
 - Resumable — start from any post offset
@@ -81,6 +81,7 @@ oauth_token_secret = "your_oauth_token_secret"
 [settings]
 debug = true                    # enable debug logging + auto log file
 # log_file = "~/logs/tumblr-dl.log"  # optional: explicit log file path
+# max_concurrent = 4            # concurrent downloads (1-32, default: 4)
 
 # Global defaults — apply to all blogs unless overridden
 [defaults]
@@ -125,6 +126,7 @@ The `[settings]` section controls app-level behavior:
 |-----|------|-------------|
 | `debug` | boolean | Enable debug logging and auto-create a log file |
 | `log_file` | string | Write debug-level logs to a specific file |
+| `max_concurrent` | integer | Max concurrent downloads, 1–32 (default: 4) |
 
 ## Usage
 
@@ -165,6 +167,7 @@ Runs all `[blog.*]` sections from your config file. CLI flags override config va
 | `--exclude-blogs PATTERNS` | off | Comma-separated glob patterns of blog names to skip in reblog trails |
 | `--sync` | off | Download all blogs defined in the TOML config file |
 | `--version` | — | Show version number and exit |
+| `-j`, `--max-concurrent N` | `4` | Max concurrent downloads (1–32) |
 | `--debug` | off | Enable debug logging and write a log file |
 | `--log-file PATH` | off | Write debug-level logs to a specific file |
 
@@ -296,9 +299,15 @@ tumblr-dl --tag photography --exclude-tags "ai*,generated" --exclude-blogs "spam
 
 This project uses a fully async (`asyncio`) architecture with
 [curl_cffi](https://github.com/lexiforest/curl_cffi) for HTTP. curl_cffi provides
-native async support via `AsyncSession` and uses libcurl under the hood, whose TLS
-stack is accepted by Tumblr's CDN fingerprinting (unlike pure-Python clients like
-`httpx` and `aiohttp`, which get HTTP 403 from Tumblr's nginx layer).
+native async support via `AsyncSession` and uses libcurl under the hood, whose
+default TLS stack is accepted by Tumblr's CDN (unlike pure-Python clients like
+`httpx` and `aiohttp`, which get HTTP 403). Note: curl_cffi's `impersonate`
+feature is intentionally **not** used — Tumblr's CDN actively blocks browser TLS
+fingerprints and serves HTML error pages instead of media.
+
+Media downloads run concurrently within each API batch (default: 4 parallel
+downloads, configurable via `--max-concurrent`). API pagination stays sequential
+to respect rate limits.
 
 OAuth1 request signing is handled by `oauthlib` directly.
 

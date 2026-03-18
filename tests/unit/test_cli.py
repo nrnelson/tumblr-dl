@@ -2,12 +2,23 @@
 
 from __future__ import annotations
 
+import asyncio
+from unittest.mock import AsyncMock, patch
+
 from tumblr_dl.cli import (
     _collect_trail_blogs,
+    _download_items_concurrent,
     _matches_exclusion,
     _parse_exclude_patterns,
 )
-from tumblr_dl.models import PostMetadata, TrailEntry
+from tumblr_dl.models import (
+    DownloadStats,
+    DownloadStatus,
+    MediaItem,
+    MediaType,
+    PostMetadata,
+    TrailEntry,
+)
 
 # --- _parse_exclude_patterns ---
 
@@ -180,3 +191,115 @@ def test_blog_exclusion_no_match() -> None:
     """No match when trail blogs are all clean."""
     trail_blogs = ["goodblog", "niceblog"]
     assert _matches_exclusion(trail_blogs, ["spambot*", "badblog"]) is None
+
+
+# --- _download_items_concurrent ---
+
+
+def _make_item(post_id: int = 1) -> MediaItem:
+    """Create a minimal MediaItem for testing."""
+    return MediaItem(
+        url=f"https://example.com/{post_id}.jpg",
+        post_id=post_id,
+        media_type=MediaType.IMAGE,
+        blog_name="testblog",
+    )
+
+
+async def test_concurrent_downloads_records_stats(tmp_path: object) -> None:
+    """All items are downloaded and stats are recorded."""
+    items = [_make_item(i) for i in range(5)]
+    stats = DownloadStats()
+    semaphore = asyncio.Semaphore(4)
+
+    with patch(
+        "tumblr_dl.cli.download_item",
+        new_callable=AsyncMock,
+        return_value=DownloadStatus.SUCCESS,
+    ):
+        await _download_items_concurrent(
+            items,
+            tmp_path,
+            AsyncMock(),
+            stats,
+            semaphore,  # type: ignore[arg-type]
+        )
+
+    assert sum(stats.downloaded.values()) == 5
+    assert stats.downloaded[MediaType.IMAGE] == 5
+
+
+async def test_concurrent_downloads_handles_failures(tmp_path: object) -> None:
+    """Failed downloads are recorded as FAILED, not raised."""
+    from tumblr_dl.exceptions import DownloadError
+
+    items = [_make_item(i) for i in range(3)]
+    stats = DownloadStats()
+    semaphore = asyncio.Semaphore(4)
+
+    async def mock_download(
+        item: MediaItem, output_dir: object, dedup: object
+    ) -> DownloadStatus:
+        if item.post_id == 1:
+            raise DownloadError("test failure", context={"url": item.url})
+        return DownloadStatus.SUCCESS
+
+    with patch("tumblr_dl.cli.download_item", side_effect=mock_download):
+        await _download_items_concurrent(
+            items,
+            tmp_path,
+            AsyncMock(),
+            stats,
+            semaphore,  # type: ignore[arg-type]
+        )
+
+    assert stats.downloaded[MediaType.IMAGE] == 2
+    assert stats.failed[MediaType.IMAGE] == 1
+
+
+async def test_concurrent_downloads_respects_semaphore(tmp_path: object) -> None:
+    """No more than N downloads run simultaneously."""
+    max_concurrent = 2
+    active = 0
+    peak = 0
+
+    async def mock_download(
+        item: MediaItem, output_dir: object, dedup: object
+    ) -> DownloadStatus:
+        nonlocal active, peak
+        active += 1
+        peak = max(peak, active)
+        await asyncio.sleep(0.01)
+        active -= 1
+        return DownloadStatus.SUCCESS
+
+    items = [_make_item(i) for i in range(10)]
+    semaphore = asyncio.Semaphore(max_concurrent)
+    stats = DownloadStats()
+
+    with patch("tumblr_dl.cli.download_item", side_effect=mock_download):
+        await _download_items_concurrent(
+            items,
+            tmp_path,
+            AsyncMock(),
+            stats,
+            semaphore,  # type: ignore[arg-type]
+        )
+
+    assert peak <= max_concurrent
+    assert sum(stats.downloaded.values()) == 10
+
+
+async def test_concurrent_downloads_empty_list(tmp_path: object) -> None:
+    """Empty item list completes without error."""
+    stats = DownloadStats()
+    semaphore = asyncio.Semaphore(4)
+    await _download_items_concurrent(
+        [],
+        tmp_path,
+        AsyncMock(),
+        stats,
+        semaphore,  # type: ignore[arg-type]
+    )
+    assert stats.posts_processed == 0
+    assert sum(stats.downloaded.values()) == 0

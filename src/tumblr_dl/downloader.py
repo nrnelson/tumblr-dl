@@ -16,11 +16,14 @@ from tumblr_dl.utils import sanitize_filename
 
 logger = logging.getLogger(__name__)
 
-# Last updated: 2026-03
+# Manual User-Agent string. curl_cffi's impersonate feature triggers Tumblr's
+# CDN to serve HTML error pages instead of media — the browser TLS fingerprints
+# are actively blocked. curl_cffi's *default* TLS stack (non-impersonated) is
+# accepted, so we pair it with a conventional UA string.
 _USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/146.0.0.0 Safari/537.36"
+    "Chrome/131.0.0.0 Safari/537.36"
 )
 
 
@@ -99,7 +102,7 @@ class SqliteDedup(DedupStrategy):
             blog_name=item.blog_name,
             post_id=item.post_id,
             url=item.url,
-            file_path=str(dest),
+            file_path=dest.name,
             media_type=item.media_type.value,
             status=status.value,
             file_size=file_size,
@@ -111,14 +114,10 @@ class SqliteDedup(DedupStrategy):
 
 
 def _resolve_path(item: MediaItem, output_dir: Path) -> Path:
-    """Determine the local file path for a media item.
-
-    Prefixes with post_id to prevent filename collisions across posts
-    (Tumblr frequently reuses generic basenames like ``tumblr_abc123.jpg``).
-    """
+    """Determine the local file path for a media item."""
     raw_name = Path(urlparse(item.url).path).name
     safe_name = sanitize_filename(raw_name)
-    return output_dir / f"{item.post_id}_{safe_name}"
+    return output_dir / safe_name
 
 
 async def _async_download(url: str, dest: Path, blog_name: str) -> None:
