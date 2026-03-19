@@ -97,9 +97,10 @@ async def test_download_item_skips_duplicate(tmp_path: Path) -> None:
     item = _make_item()
     dedup = _make_async_dedup(is_dup=True)
 
-    status = await download_item(item, tmp_path, dedup)
+    status, byte_count = await download_item(item, tmp_path, dedup)
 
     assert status is DownloadStatus.SKIPPED
+    assert byte_count == 0
     dedup.record.assert_not_called()
 
 
@@ -109,11 +110,14 @@ async def test_download_item_success(tmp_path: Path) -> None:
     dedup = _make_async_dedup()
 
     with patch(
-        "tumblr_dl.downloader._async_download", new_callable=AsyncMock
+        "tumblr_dl.downloader._async_download",
+        new_callable=AsyncMock,
+        return_value=1024,
     ) as mock_dl:
-        status = await download_item(item, tmp_path, dedup)
+        status, byte_count = await download_item(item, tmp_path, dedup)
 
     assert status is DownloadStatus.SUCCESS
+    assert byte_count == 1024
     mock_dl.assert_awaited_once()
     dedup.record.assert_called_once()
     _, _, recorded_status = dedup.record.call_args[0]

@@ -96,6 +96,9 @@ class DownloadStats:
     failed: dict[MediaType, int] = field(
         default_factory=_zero_counts,
     )
+    bytes_downloaded: dict[MediaType, int] = field(
+        default_factory=_zero_counts,
+    )
     posts_processed: int = 0
     api_calls: int = 0
     elapsed_seconds: float = 0.0
@@ -107,15 +110,29 @@ class DownloadStats:
         self,
         media_type: MediaType,
         status: DownloadStatus,
+        byte_count: int = 0,
     ) -> None:
         """Record the result of a download attempt."""
         self.found[media_type] += 1
         if status is DownloadStatus.SUCCESS:
             self.downloaded[media_type] += 1
+            self.bytes_downloaded[media_type] += byte_count
         elif status is DownloadStatus.SKIPPED:
             self.skipped[media_type] += 1
         elif status is DownloadStatus.FAILED:
             self.failed[media_type] += 1
+
+    @staticmethod
+    def _format_bytes(n: int) -> str:
+        """Format a byte count as a human-readable string."""
+        if n < 1024:
+            return f"{n} B"
+        for unit in ("KB", "MB", "GB", "TB"):
+            n_f = n / 1024
+            if n_f < 1024 or unit == "TB":
+                return f"{n_f:.1f} {unit}"
+            n = int(n_f)
+        return f"{n} B"  # unreachable, keeps mypy happy
 
     def summary(self) -> str:
         """Return a human-readable summary of download stats."""
@@ -125,16 +142,21 @@ class DownloadStats:
             got = self.downloaded[media_type]
             skip = self.skipped[media_type]
             fail = self.failed[media_type]
+            size = self.bytes_downloaded[media_type]
             label = media_type.value.capitalize()
+            size_str = f", {self._format_bytes(size)}" if size else ""
             lines.append(
                 f"  {label}: {found} found, "
                 f"{got} downloaded, {skip} skipped, "
-                f"{fail} failed"
+                f"{fail} failed{size_str}"
             )
 
-        total = sum(self.downloaded.values())
+        total_files = sum(self.downloaded.values())
+        total_bytes = sum(self.bytes_downloaded.values())
+        total_str = self._format_bytes(total_bytes) if total_bytes else "0 B"
         lines.append(
-            f"Total: {self.posts_processed} posts processed, {total} files downloaded"
+            f"Total: {self.posts_processed} posts processed, "
+            f"{total_files} files downloaded ({total_str})"
         )
         if self.early_stopped:
             lines.append(f"  (stopped early at known post {self.early_stop_post_id})")

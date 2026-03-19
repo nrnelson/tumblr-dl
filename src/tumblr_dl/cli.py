@@ -350,11 +350,11 @@ async def _download_items_concurrent(
     async def _do_one(item: MediaItem) -> None:
         async with semaphore:
             try:
-                status = await download_item(item, output_dir, dedup)
+                status, byte_count = await download_item(item, output_dir, dedup)
             except DownloadError as exc:
                 logger.warning("%s", exc)
-                status = DownloadStatus.FAILED
-            stats.record(item.media_type, status)
+                status, byte_count = DownloadStatus.FAILED, 0
+            stats.record(item.media_type, status, byte_count)
 
     await asyncio.gather(*[_do_one(item) for item in items])
 
@@ -715,6 +715,7 @@ def _merge_stats(target: DownloadStats, source: DownloadStats) -> None:
         target.downloaded[mt] += source.downloaded[mt]
         target.skipped[mt] += source.skipped[mt]
         target.failed[mt] += source.failed[mt]
+        target.bytes_downloaded[mt] += source.bytes_downloaded[mt]
     target.posts_processed += source.posts_processed
 
 

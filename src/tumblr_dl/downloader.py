@@ -147,7 +147,7 @@ def _resolve_path(item: MediaItem, output_dir: Path) -> Path:
     return dest
 
 
-async def _async_download(url: str, dest: Path, blog_name: str) -> None:
+async def _async_download(url: str, dest: Path, blog_name: str) -> int:
     """Download a file using native async HTTP with streaming.
 
     Uses a fresh session per request to avoid curl_cffi connection-pool
@@ -155,6 +155,9 @@ async def _async_download(url: str, dest: Path, blog_name: str) -> None:
     on Tumblr's CDN).
 
     Streams the response to a temporary file, then renames on success.
+
+    Returns:
+        Total bytes written to disk.
     """
     headers = {
         "User-Agent": _USER_AGENT,
@@ -211,6 +214,7 @@ async def _async_download(url: str, dest: Path, blog_name: str) -> None:
             )
 
         await asyncio.to_thread(tmp.rename, dest)
+        return total_bytes
     except BaseException:
         # Catch BaseException (not just Exception) to ensure the .part
         # file is cleaned up on KeyboardInterrupt and SystemExit too.
@@ -222,7 +226,7 @@ async def download_item(
     item: MediaItem,
     output_dir: Path,
     dedup: DedupStrategy,
-) -> DownloadStatus:
+) -> tuple[DownloadStatus, int]:
     """Download a single media item to disk.
 
     Args:
@@ -231,7 +235,7 @@ async def download_item(
         dedup: Strategy for duplicate detection.
 
     Returns:
-        The resulting DownloadStatus.
+        Tuple of (status, bytes_downloaded). Bytes is 0 for skipped/failed.
 
     Raises:
         DownloadError: If the HTTP request fails.
@@ -240,19 +244,19 @@ async def download_item(
 
     if await dedup.is_duplicate(item, dest):
         logger.debug("Skipping (exists): %s", item.url)
-        return DownloadStatus.SKIPPED
+        return DownloadStatus.SKIPPED, 0
 
     logger.info("Downloading: %s -> %s", item.url, dest.name)
 
     try:
-        await _async_download(item.url, dest, item.blog_name)
+        byte_count = await _async_download(item.url, dest, item.blog_name)
 
         await dedup.record(item, dest, DownloadStatus.SUCCESS)
-        return DownloadStatus.SUCCESS
+        return DownloadStatus.SUCCESS, byte_count
 
     except DownloadError:
         await dedup.record(item, dest, DownloadStatus.FAILED)
-        raise
+        raise  # byte_count is irrelevant; caller catches and records FAILED
 
     except Exception as exc:
         await dedup.record(item, dest, DownloadStatus.FAILED)

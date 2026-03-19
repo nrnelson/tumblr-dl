@@ -246,7 +246,7 @@ async def test_concurrent_downloads_records_stats(tmp_path: object) -> None:
     with patch(
         "tumblr_dl.cli.download_item",
         new_callable=AsyncMock,
-        return_value=DownloadStatus.SUCCESS,
+        return_value=(DownloadStatus.SUCCESS, 2048),
     ):
         await _download_items_concurrent(
             items,
@@ -258,6 +258,7 @@ async def test_concurrent_downloads_records_stats(tmp_path: object) -> None:
 
     assert sum(stats.downloaded.values()) == 5
     assert stats.downloaded[MediaType.IMAGE] == 5
+    assert stats.bytes_downloaded[MediaType.IMAGE] == 2048 * 5
 
 
 async def test_concurrent_downloads_handles_failures(tmp_path: object) -> None:
@@ -270,10 +271,10 @@ async def test_concurrent_downloads_handles_failures(tmp_path: object) -> None:
 
     async def mock_download(
         item: MediaItem, output_dir: object, dedup: object
-    ) -> DownloadStatus:
+    ) -> tuple[DownloadStatus, int]:
         if item.post_id == 1:
             raise DownloadError("test failure", context={"url": item.url})
-        return DownloadStatus.SUCCESS
+        return DownloadStatus.SUCCESS, 1024
 
     with patch("tumblr_dl.cli.download_item", side_effect=mock_download):
         await _download_items_concurrent(
@@ -296,13 +297,13 @@ async def test_concurrent_downloads_respects_semaphore(tmp_path: object) -> None
 
     async def mock_download(
         item: MediaItem, output_dir: object, dedup: object
-    ) -> DownloadStatus:
+    ) -> tuple[DownloadStatus, int]:
         nonlocal active, peak
         active += 1
         peak = max(peak, active)
         await asyncio.sleep(0.01)
         active -= 1
-        return DownloadStatus.SUCCESS
+        return DownloadStatus.SUCCESS, 512
 
     items = [_make_item(i) for i in range(10)]
     semaphore = asyncio.Semaphore(max_concurrent)
