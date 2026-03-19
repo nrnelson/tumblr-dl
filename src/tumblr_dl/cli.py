@@ -501,7 +501,11 @@ async def _download_blog(
 
     run_highest_id = 0
     run_newest_ts = 0
-    queue: asyncio.Queue[list[MediaItem] | None] = asyncio.Queue(
+
+    # Queue carries (offset, items) so the consumer can save progress
+    # after downloads complete — not before.
+    _QueueItem = tuple[int, list[MediaItem]]
+    queue: asyncio.Queue[_QueueItem | None] = asyncio.Queue(
         maxsize=_PREFETCH_BATCHES,
     )
 
@@ -570,30 +574,34 @@ async def _download_blog(
                         stop_pagination = True
                         break
 
-                if batch_items:
-                    await queue.put(batch_items)
+                # Always enqueue so the consumer can track progress,
+                # even for batches with no media items.
+                await queue.put((offset, batch_items))
 
                 if stop_pagination:
                     break
 
                 offset += _BATCH_SIZE
-
-                # Save full-scan progress so we can resume after
-                # interruption (ctrl+c, rate-limit abort, etc.).
-                if full_scan and tracker:
-                    await tracker.update_full_scan_offset(blog_name, offset)
         finally:
             with contextlib.suppress(asyncio.CancelledError):
                 await queue.put(None)
 
     async def _consume() -> None:
         while True:
-            batch = await queue.get()
-            if batch is None:
+            item = await queue.get()
+            if item is None:
                 break
-            await _download_items_concurrent(
-                batch, output_dir, dedup, stats, semaphore, dns_cache=dns_cache
-            )
+            batch_offset, batch = item
+            if batch:
+                await _download_items_concurrent(
+                    batch, output_dir, dedup, stats, semaphore, dns_cache=dns_cache
+                )
+            # Save offset AFTER downloads complete so we never skip
+            # files that haven't been written to disk yet.
+            if full_scan and tracker:
+                await tracker.update_full_scan_offset(
+                    blog_name, batch_offset + _BATCH_SIZE,
+                )
             if tracker:
                 await tracker.commit()
 
@@ -611,10 +619,6 @@ async def _download_blog(
             blog_name, new_highest, new_ts, stats.posts_processed
         )
         logger.debug("Updated blog cursor: highest_post_id=%d", new_highest)
-        # Full scan completed — clear the resume offset.
-        if full_scan:
-            await tracker.clear_full_scan_offset(blog_name)
-            logger.debug("Full scan complete for %s, cleared resume offset.", blog_name)
 
     return stats
 
@@ -865,11 +869,18 @@ async def _process_blog_list(
     dns_cache: AsyncDNSCache | None = None,
 ) -> None:
     """Download media from a list of blogs, merging stats into *total_stats*."""
+    # Track DB paths that ran full scans so we can clear offsets
+    # after all blogs complete (may be one shared DB or several).
+    full_scan_db_paths: set[Path] = set()
+
     for i, blog_name in enumerate(blog_names):
         blog_config = resolve_blog_config(blog_name, app_config, overrides)
 
         # Open tracker early so schema errors surface before per-blog logging.
         tracker, dedup = await _setup_tracker_and_dedup(blog_config)
+
+        if tracker and blog_config.full_scan:
+            full_scan_db_paths.add(tracker.db_path)
 
         if len(blog_names) > 1:
             logger.info(
@@ -906,6 +917,17 @@ async def _process_blog_list(
             )
 
         _merge_stats(total_stats, blog_stats)
+
+    # All blogs completed successfully — clear full-scan resume offsets
+    # so the next --full-scan starts fresh.
+    if full_scan_db_paths:
+        for db_path in full_scan_db_paths:
+            tracker = DownloadTracker(db_path)
+            await tracker.open()
+            try:
+                await tracker.clear_all_full_scan_offsets()
+            finally:
+                await tracker.close()
 
 
 async def _run(args: argparse.Namespace) -> int:

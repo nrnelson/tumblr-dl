@@ -100,6 +100,11 @@ class DownloadTracker:
         self._db_path = db_path
         self._conn: aiosqlite.Connection | None = None
 
+    @property
+    def db_path(self) -> Path:
+        """Path to the underlying SQLite database file."""
+        return self._db_path
+
     async def open(self) -> None:
         """Open the database and ensure the schema exists."""
         self._conn = await aiosqlite.connect(self._db_path)
@@ -271,7 +276,7 @@ class DownloadTracker:
         await conn.commit()
 
     async def clear_full_scan_offset(self, blog_name: str) -> None:
-        """Clear the full-scan offset after a scan completes."""
+        """Clear the full-scan offset for a single blog."""
         conn = self._ensure_conn()
         await conn.execute(
             "UPDATE blog_state SET full_scan_offset = NULL "
@@ -279,6 +284,21 @@ class DownloadTracker:
             (blog_name,),
         )
         await conn.commit()
+
+    async def clear_all_full_scan_offsets(self) -> None:
+        """Clear full-scan offsets for all blogs.
+
+        Called after an entire ``--full-scan`` job completes
+        successfully (all blogs finished). This resets every blog
+        so the next ``--full-scan`` starts fresh.
+        """
+        conn = self._ensure_conn()
+        await conn.execute(
+            "UPDATE blog_state SET full_scan_offset = NULL "
+            "WHERE full_scan_offset IS NOT NULL",
+        )
+        await conn.commit()
+        logger.debug("Cleared all full-scan resume offsets.")
 
     # --- Download records ---
 

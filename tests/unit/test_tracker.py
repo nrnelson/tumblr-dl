@@ -237,3 +237,18 @@ async def test_full_scan_offset_independent_of_blog_state(
     assert state is not None
     assert state.highest_post_id == 100
     assert await tracker.get_full_scan_offset("myblog") == 500
+
+
+async def test_clear_all_full_scan_offsets(
+    tracker: DownloadTracker,
+) -> None:
+    """Clearing all offsets resets every blog."""
+    await tracker.update_full_scan_offset("blog_a", 100)
+    await tracker.update_full_scan_offset("blog_b", 200)
+    await tracker.update_full_scan_offset("blog_c", 300)
+
+    await tracker.clear_all_full_scan_offsets()
+
+    assert await tracker.get_full_scan_offset("blog_a") is None
+    assert await tracker.get_full_scan_offset("blog_b") is None
+    assert await tracker.get_full_scan_offset("blog_c") is None
