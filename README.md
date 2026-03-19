@@ -127,6 +127,7 @@ oauth_token_secret = "your_oauth_token_secret"
 debug = true                    # enable debug logging + auto log file
 # log_file = "~/logs/tumblr-dl.log"  # optional: explicit log file path
 # max_concurrent = 4            # concurrent downloads (1-32, default: 4)
+# no_dns_cache = false           # disable internal DNS cache
 output_dir = "tumblr_downloads"
 exclude_tags = ["gore*", "explicit"]
 exclude_blogs = ["spambot*"]
@@ -158,6 +159,7 @@ The `[options]` section supports all of the following keys:
 | `debug` | boolean | Enable debug logging and auto-create a log file |
 | `log_file` | string | Write debug-level logs to a specific file |
 | `max_concurrent` | integer | Max concurrent downloads, 1–32 (default: 4) |
+| `no_dns_cache` | boolean | Disable internal DNS cache |
 | `output_dir` | string | Directory to save media |
 | `exclude_tags` | list | Glob patterns to skip by tag |
 | `exclude_blogs` | list | Glob patterns to skip by reblog source |
@@ -171,7 +173,7 @@ The `[options]` section supports all of the following keys:
 | `blogs` | list | Blog names to download with `--sync` |
 
 Per-blog `[blog.*]` sections support the same keys (except `debug`, `log_file`,
-`max_concurrent`, and `blogs`) and override `[options]` defaults.
+`max_concurrent`, `no_dns_cache`, and `blogs`) and override `[options]` defaults.
 
 ## Usage
 
@@ -213,6 +215,7 @@ Runs all `[blog.*]` sections from your config file. CLI flags override config va
 | `--sync` | off | Download all blogs defined in the TOML config file |
 | `--version` | — | Show version number and exit |
 | `-j`, `--max-concurrent N` | `4` | Max concurrent downloads (1–32) |
+| `--no-dns-cache` | off | Disable internal DNS cache (each download resolves DNS independently) |
 | `--debug` | off | Enable debug logging and write a log file |
 | `--log-file PATH` | off | Write debug-level logs to a specific file |
 
@@ -374,6 +377,23 @@ gates API requests regardless of pipeline depth.
 
 OAuth1 request signing is handled by `oauthlib` directly.
 
+### DNS caching
+
+Each media download uses a fresh `AsyncSession` (to avoid stale keep-alive
+connections on Tumblr's CDN), which means each download would normally trigger
+a new DNS lookup for `64.media.tumblr.com`. Under high concurrency this can
+overwhelm local DNS resolvers — especially on Windows — causing
+`Could not resolve host` failures.
+
+To avoid this, tumblr-dl includes an internal DNS cache (`AsyncDNSCache`) that
+resolves CDN hostnames once at startup and feeds the cached IP to libcurl via
+`CURLOPT_RESOLVE` on every request. This eliminates DNS queries during downloads
+entirely while keeping the fresh-session-per-download pattern intact. The cache
+uses a 5-minute TTL and re-resolves automatically if an entry expires mid-session.
+
+Disable with `--no-dns-cache` if you need per-request DNS resolution (e.g. for
+debugging or when using a DNS-based load balancer).
+
 ### Incremental sync with SQLite
 
 On first run, tumblr-dl scans the entire blog and stores the highest post ID in a
@@ -457,6 +477,7 @@ src/tumblr_dl/
 ├── cli.py             — async argparse + main() entry point
 ├── client.py          — async TumblrClient (OAuth1 + Tumblr API v2)
 ├── config.py          — TOML config + env var auth loading
+├── dns.py             — async DNS cache (TTL-based, feeds CURLOPT_RESOLVE)
 ├── downloader.py      — async download_item() with DedupStrategy ABC
 ├── exceptions.py      — TumblrDlError hierarchy
 ├── extractors.py      — media URL extraction per post type

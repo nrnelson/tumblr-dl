@@ -58,6 +58,7 @@ class AppSettings:
     debug: bool = False
     log_file: str | None = None
     max_concurrent: int = 4
+    no_dns_cache: bool = False
 
 
 @dataclass
@@ -104,9 +105,7 @@ def resolve_config_path() -> Path | None:
         path = Path(env_path).expanduser()
         if path.is_file():
             return path
-        logger.warning(
-            "TUMBLR_DL_CONFIG points to %s but file does not exist.", path
-        )
+        logger.warning("TUMBLR_DL_CONFIG points to %s but file does not exist.", path)
         return None
 
     config_file = _platform_config_dir() / "config.toml"
@@ -230,6 +229,14 @@ def _parse_app_settings(data: dict[str, object]) -> AppSettings:
                     context={"key": key, "value": value},
                 )
             settings.max_concurrent = value
+        elif key == "no_dns_cache":
+            if not isinstance(value, bool):
+                raise ConfigError(
+                    f"Config key 'settings.{key}' must be a boolean, "
+                    f"got {type(value).__name__}",
+                    context={"key": key, "value": value},
+                )
+            settings.no_dns_cache = value
         else:
             logger.warning(
                 "Unknown config key '%s' in [settings] section (ignored).",
@@ -293,7 +300,7 @@ def load_toml_config(path: Path) -> AppConfig:
     options_data = data.get("options")
     if isinstance(options_data, dict):
         # Split keys: app-level settings vs blog-level defaults.
-        settings_keys = {"debug", "log_file", "max_concurrent"}
+        settings_keys = {"debug", "log_file", "max_concurrent", "no_dns_cache"}
         blog_keys = set(vars(BlogConfig()))
         settings_part: dict[str, object] = {}
         defaults_part: dict[str, object] = {}

@@ -270,7 +270,7 @@ async def test_concurrent_downloads_handles_failures(tmp_path: object) -> None:
     semaphore = asyncio.Semaphore(4)
 
     async def mock_download(
-        item: MediaItem, output_dir: object, dedup: object
+        item: MediaItem, output_dir: object, dedup: object, **kwargs: object
     ) -> tuple[DownloadStatus, int]:
         if item.post_id == 1:
             raise DownloadError("test failure", context={"url": item.url})
@@ -296,7 +296,7 @@ async def test_concurrent_downloads_respects_semaphore(tmp_path: object) -> None
     peak = 0
 
     async def mock_download(
-        item: MediaItem, output_dir: object, dedup: object
+        item: MediaItem, output_dir: object, dedup: object, **kwargs: object
     ) -> tuple[DownloadStatus, int]:
         nonlocal active, peak
         active += 1

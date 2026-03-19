@@ -105,6 +105,9 @@ class DownloadStats:
     rate_limit: int = 300
     early_stopped: bool = False
     early_stop_post_id: int | None = None
+    dns_hits: int = 0
+    dns_misses: int = 0
+    dns_expired: int = 0
 
     def record(
         self,
@@ -180,6 +183,17 @@ class DownloadStats:
             lines.append(
                 f"  Rate limit utilization: {utilization:.1f}% "
                 f"(limit: {self.rate_limit}/min)"
+            )
+
+        dns_total = self.dns_hits + self.dns_misses + self.dns_expired
+        if dns_total > 0:
+            lines.append("")
+            lines.append("--- DNS Cache ---")
+            lines.append(
+                f"  Lookups: {dns_total} "
+                f"({self.dns_hits} cached, "
+                f"{self.dns_misses} resolved, "
+                f"{self.dns_expired} expired)"
             )
 
         return "\n".join(lines)

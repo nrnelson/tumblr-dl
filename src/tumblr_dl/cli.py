@@ -27,6 +27,7 @@ from tumblr_dl.config import (
     resolve_blog_config,
     resolve_config_path,
 )
+from tumblr_dl.dns import AsyncDNSCache
 from tumblr_dl.downloader import (
     DedupStrategy,
     FilesystemDedup,
@@ -160,6 +161,12 @@ def _build_parser() -> argparse.ArgumentParser:
         type=int,
         default=None,
         help="Max concurrent downloads (default: 4, max: 32)",
+    )
+    parser.add_argument(
+        "--no-dns-cache",
+        action="store_true",
+        default=None,
+        help="Disable internal DNS cache (each download resolves DNS independently)",
     )
     return parser
 
@@ -344,13 +351,16 @@ async def _download_items_concurrent(
     dedup: DedupStrategy,
     stats: DownloadStats,
     semaphore: asyncio.Semaphore,
+    dns_cache: AsyncDNSCache | None = None,
 ) -> None:
     """Download media items concurrently, gated by semaphore."""
 
     async def _do_one(item: MediaItem) -> None:
         async with semaphore:
             try:
-                status, byte_count = await download_item(item, output_dir, dedup)
+                status, byte_count = await download_item(
+                    item, output_dir, dedup, dns_cache=dns_cache
+                )
             except DownloadError as exc:
                 logger.warning("%s", exc)
                 status, byte_count = DownloadStatus.FAILED, 0
@@ -396,6 +406,7 @@ async def _retry_failed_downloads(
     dedup: DedupStrategy,
     stats: DownloadStats,
     semaphore: asyncio.Semaphore,
+    dns_cache: AsyncDNSCache | None = None,
 ) -> None:
     """Re-attempt previously failed downloads.
 
@@ -406,6 +417,7 @@ async def _retry_failed_downloads(
         dedup: Duplicate detection strategy.
         stats: Stats object to record results into.
         semaphore: Concurrency limiter for parallel downloads.
+        dns_cache: Optional DNS cache to avoid repeated lookups.
     """
     failed = await tracker.get_failed_downloads(blog_name)
     if not failed:
@@ -421,7 +433,9 @@ async def _retry_failed_downloads(
         )
         for record in failed
     ]
-    await _download_items_concurrent(items, output_dir, dedup, stats, semaphore)
+    await _download_items_concurrent(
+        items, output_dir, dedup, stats, semaphore, dns_cache=dns_cache
+    )
 
 
 async def _download_blog(
@@ -436,6 +450,7 @@ async def _download_blog(
     full_scan: bool = False,
     exclude_patterns: list[str] | None = None,
     exclude_blog_patterns: list[str] | None = None,
+    dns_cache: AsyncDNSCache | None = None,
 ) -> DownloadStats:
     """Paginate through a blog and download all media.
 
@@ -503,9 +518,7 @@ async def _download_blog(
                     id_at_or_below_cursor = (
                         highest_known_id and post_id <= highest_known_id
                     )
-                    ts_not_newer = (
-                        last_known_ts == 0 or post_ts <= last_known_ts
-                    )
+                    ts_not_newer = last_known_ts == 0 or post_ts <= last_known_ts
                     if id_at_or_below_cursor and ts_not_newer:
                         logger.info(
                             "Reached previously seen post %d "
@@ -564,7 +577,7 @@ async def _download_blog(
             if batch is None:
                 break
             await _download_items_concurrent(
-                batch, output_dir, dedup, stats, semaphore
+                batch, output_dir, dedup, stats, semaphore, dns_cache=dns_cache
             )
             if tracker:
                 await tracker.commit()
@@ -597,6 +610,7 @@ async def _download_tagged(
     max_posts: int | None = None,
     exclude_patterns: list[str] | None = None,
     exclude_blog_patterns: list[str] | None = None,
+    dns_cache: AsyncDNSCache | None = None,
 ) -> DownloadStats:
     """Search by tag across Tumblr and download matching media.
 
@@ -639,14 +653,13 @@ async def _download_tagged(
                     post_id: int = post["id"]
 
                     # The blog name comes from each individual post.
-                    post_blog = post.get("blog_name") or post.get(
-                        "blog", {}
-                    ).get("name", "unknown")
+                    post_blog = post.get("blog_name") or post.get("blog", {}).get(
+                        "name", "unknown"
+                    )
 
                     stats.posts_processed += 1
                     logger.info(
-                        "Processing tagged post %d from %s "
-                        "(ID: %s, type: %s)...",
+                        "Processing tagged post %d from %s (ID: %s, type: %s)...",
                         stats.posts_processed,
                         post_blog,
                         post_id,
@@ -682,9 +695,7 @@ async def _download_tagged(
                     before = last_ts
                 else:
                     # No progress — avoid infinite loop.
-                    logger.info(
-                        "Pagination cursor did not advance. Stopping."
-                    )
+                    logger.info("Pagination cursor did not advance. Stopping.")
                     break
         finally:
             with contextlib.suppress(asyncio.CancelledError):
@@ -696,7 +707,7 @@ async def _download_tagged(
             if batch is None:
                 break
             await _download_items_concurrent(
-                batch, output_dir, dedup, stats, semaphore
+                batch, output_dir, dedup, stats, semaphore, dns_cache=dns_cache
             )
             if tracker:
                 await tracker.commit()
@@ -726,6 +737,7 @@ async def _run_blog_download(
     tracker: DownloadTracker | None,
     dedup: DedupStrategy,
     semaphore: asyncio.Semaphore,
+    dns_cache: AsyncDNSCache | None = None,
 ) -> DownloadStats:
     """Run a single blog download using resolved BlogConfig."""
     logger.debug(
@@ -750,7 +762,13 @@ async def _run_blog_download(
     retry_stats = DownloadStats()
     if blog_config.retry_failed and tracker:
         await _retry_failed_downloads(
-            tracker, blog_name, output_dir, dedup, retry_stats, semaphore
+            tracker,
+            blog_name,
+            output_dir,
+            dedup,
+            retry_stats,
+            semaphore,
+            dns_cache=dns_cache,
         )
 
     if blog_config.tag:
@@ -764,6 +782,7 @@ async def _run_blog_download(
             max_posts=blog_config.max_posts,
             exclude_patterns=exclude_patterns,
             exclude_blog_patterns=exclude_blog_patterns,
+            dns_cache=dns_cache,
         )
     else:
         blog_stats = await _download_blog(
@@ -778,6 +797,7 @@ async def _run_blog_download(
             full_scan=blog_config.full_scan,
             exclude_patterns=exclude_patterns,
             exclude_blog_patterns=exclude_blog_patterns,
+            dns_cache=dns_cache,
         )
 
     _merge_stats(blog_stats, retry_stats)
@@ -823,6 +843,7 @@ async def _process_blog_list(
     overrides: dict[str, Any],
     total_stats: DownloadStats,
     semaphore: asyncio.Semaphore,
+    dns_cache: AsyncDNSCache | None = None,
 ) -> None:
     """Download media from a list of blogs, merging stats into *total_stats*."""
     for i, blog_name in enumerate(blog_names):
@@ -845,7 +866,13 @@ async def _process_blog_list(
         )
         try:
             blog_stats = await _run_blog_download(
-                client, blog_name, blog_config, tracker, dedup, semaphore
+                client,
+                blog_name,
+                blog_config,
+                tracker,
+                dedup,
+                semaphore,
+                dns_cache=dns_cache,
             )
         finally:
             if tracker:
@@ -901,6 +928,18 @@ async def _run(args: argparse.Namespace) -> int:
     semaphore = asyncio.Semaphore(max_concurrent)
     logger.debug("Max concurrent downloads: %d", max_concurrent)
 
+    # DNS cache: enabled by default, disabled with --no-dns-cache or config.
+    no_dns_cache = (
+        args.no_dns_cache if args.no_dns_cache is not None else settings.no_dns_cache
+    )
+    dns_cache: AsyncDNSCache | None = None
+    if not no_dns_cache:
+        dns_cache = AsyncDNSCache()
+        await dns_cache.warmup(["64.media.tumblr.com"])
+        logger.debug("DNS cache enabled (TTL: 300s)")
+    else:
+        logger.debug("DNS cache disabled")
+
     start_time = time.monotonic()
 
     try:
@@ -929,6 +968,7 @@ async def _run(args: argparse.Namespace) -> int:
                     overrides,
                     total_stats,
                     semaphore,
+                    dns_cache=dns_cache,
                 )
                 total_stats.api_calls = client.api_calls
                 total_stats.rate_limit = client.rate_limit
@@ -993,6 +1033,7 @@ async def _run(args: argparse.Namespace) -> int:
                             max_posts=base_config.max_posts,
                             exclude_patterns=exclude_patterns,
                             exclude_blog_patterns=exclude_blog_patterns,
+                            dns_cache=dns_cache,
                         )
                     finally:
                         if tracker:
@@ -1006,6 +1047,7 @@ async def _run(args: argparse.Namespace) -> int:
                         overrides,
                         total_stats,
                         semaphore,
+                        dns_cache=dns_cache,
                     )
 
                 total_stats.api_calls = client.api_calls
@@ -1021,6 +1063,10 @@ async def _run(args: argparse.Namespace) -> int:
         return _EXIT_RUNTIME
 
     total_stats.elapsed_seconds = time.monotonic() - start_time
+    if dns_cache:
+        total_stats.dns_hits = dns_cache.stats.hits
+        total_stats.dns_misses = dns_cache.stats.misses
+        total_stats.dns_expired = dns_cache.stats.expired
     logger.info("\n%s", total_stats.summary())
     return _EXIT_OK
 

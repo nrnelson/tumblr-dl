@@ -10,8 +10,10 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 import aiofiles
+from curl_cffi.const import CurlOpt
 from curl_cffi.requests import AsyncSession
 
+from tumblr_dl.dns import AsyncDNSCache
 from tumblr_dl.exceptions import DownloadError
 from tumblr_dl.models import DownloadStatus, MediaItem
 from tumblr_dl.tracker import DownloadTracker
@@ -154,12 +156,20 @@ def _resolve_path(item: MediaItem, output_dir: Path) -> Path:
     return dest
 
 
-async def _async_download(url: str, dest: Path, blog_name: str) -> int:
+async def _async_download(
+    url: str,
+    dest: Path,
+    blog_name: str,
+    dns_cache: AsyncDNSCache | None = None,
+) -> int:
     """Download a file using native async HTTP with streaming.
 
     Uses a fresh session per request to avoid curl_cffi connection-pool
     issues (stale keep-alive connections cause IncompleteRead / ConnectionError
     on Tumblr's CDN).
+
+    When *dns_cache* is provided, the hostname is resolved once and passed
+    to libcurl via ``CURLOPT_RESOLVE``, eliminating per-download DNS queries.
 
     Retries on transient connection failures (HTTP 0, connection resets,
     timeouts) with exponential backoff. Content-level errors (HTML
@@ -177,12 +187,22 @@ async def _async_download(url: str, dest: Path, blog_name: str) -> int:
     tmp = dest.with_suffix(dest.suffix + ".part")
     last_exc: Exception | None = None
 
+    # Pre-resolve DNS once for all retry attempts.
+    curl_options: dict[CurlOpt, object] = {}
+    if dns_cache:
+        try:
+            resolve_entries = await dns_cache.resolve_url(url)
+            if resolve_entries:
+                curl_options[CurlOpt.RESOLVE] = resolve_entries
+        except OSError as exc:
+            logger.debug("DNS cache miss/failure for %s: %s", url, exc)
+
     for attempt in range(_DL_RETRY_ATTEMPTS):
         try:
             # Fresh session per download — curl_cffi's shared session reuses
             # keep-alive connections that Tumblr's CDN resets mid-transfer.
             async with (
-                AsyncSession() as session,
+                AsyncSession(curl_options=curl_options) as session,
                 session.stream(
                     "GET", url, headers=headers, timeout=(30, 300)
                 ) as response,
@@ -249,14 +269,11 @@ async def _async_download(url: str, dest: Path, blog_name: str) -> int:
         except (_TransientError, ConnectionError, OSError) as exc:
             # Retryable: connection resets, timeouts, HTTP 5xx, truncated.
             tmp.unlink(missing_ok=True)
-            delay = min(
-                _DL_RETRY_BASE_DELAY * (2**attempt), _DL_RETRY_MAX_DELAY
-            )
+            delay = min(_DL_RETRY_BASE_DELAY * (2**attempt), _DL_RETRY_MAX_DELAY)
             last_exc = exc
             if attempt + 1 < _DL_RETRY_ATTEMPTS:
                 logger.debug(
-                    "Download failed (%s), retrying in %.0fs "
-                    "(attempt %d/%d): %s",
+                    "Download failed (%s), retrying in %.0fs (attempt %d/%d): %s",
                     exc,
                     delay,
                     attempt + 1,
@@ -291,6 +308,7 @@ async def download_item(
     item: MediaItem,
     output_dir: Path,
     dedup: DedupStrategy,
+    dns_cache: AsyncDNSCache | None = None,
 ) -> tuple[DownloadStatus, int]:
     """Download a single media item to disk.
 
@@ -298,6 +316,7 @@ async def download_item(
         item: The media item to download.
         output_dir: Directory to save files into.
         dedup: Strategy for duplicate detection.
+        dns_cache: Optional DNS cache to avoid repeated lookups.
 
     Returns:
         Tuple of (status, bytes_downloaded). Bytes is 0 for skipped/failed.
@@ -314,7 +333,9 @@ async def download_item(
     logger.info("Downloading: %s -> %s", item.url, dest.name)
 
     try:
-        byte_count = await _async_download(item.url, dest, item.blog_name)
+        byte_count = await _async_download(
+            item.url, dest, item.blog_name, dns_cache=dns_cache
+        )
 
         await dedup.record(item, dest, DownloadStatus.SUCCESS)
         return DownloadStatus.SUCCESS, byte_count
