@@ -33,10 +33,11 @@ consumer_secret = "cs"
 oauth_token = "ot"
 oauth_token_secret = "os"
 
-[defaults]
+[options]
 output_dir = "media"
 exclude_tags = ["gore*", "explicit"]
 max_posts = 1000
+blogs = ["simpleblog"]
 
 [blog.myblog]
 output_dir = "~/media/myblog"
@@ -160,7 +161,7 @@ def test_load_auth_no_sources_raises(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_load_toml_config_full(tmp_path: Path) -> None:
-    """Parses a full config with auth, defaults, and per-blog sections."""
+    """Parses a full config with auth, options, and per-blog sections."""
     config_file = tmp_path / "config.toml"
     config_file.write_text(_FULL_CONFIG_TOML)
 
@@ -171,6 +172,8 @@ def test_load_toml_config_full(tmp_path: Path) -> None:
     assert app.defaults.output_dir == "media"
     assert app.defaults.exclude_tags == ["gore*", "explicit"]
     assert app.defaults.max_posts == 1000
+    assert "simpleblog" in app.blogs
+    assert app.blogs["simpleblog"].output_dir == "tumblr_downloads"  # uses defaults
     assert "myblog" in app.blogs
     assert app.blogs["myblog"].output_dir == "~/media/myblog"
     assert app.blogs["myblog"].exclude_tags == ["nsfw"]
@@ -217,10 +220,62 @@ def test_load_toml_config_incomplete_auth(tmp_path: Path) -> None:
 def test_load_toml_config_bad_type(tmp_path: Path) -> None:
     """Wrong type for a config key raises ConfigError."""
     config_file = tmp_path / "config.toml"
-    config_file.write_text('[defaults]\nexclude_tags = "not a list"\n')
+    config_file.write_text('[options]\nexclude_tags = "not a list"\n')
 
     with pytest.raises(ConfigError, match="must be a list"):
         load_toml_config(config_file)
+
+
+def test_load_toml_config_options_blogs_array_only(tmp_path: Path) -> None:
+    """Blogs listed in [options] array get default BlogConfig."""
+    config_file = tmp_path / "config.toml"
+    config_file.write_text('[options]\nblogs = ["alpha", "bravo"]\n')
+
+    app = load_toml_config(config_file)
+    assert set(app.blogs.keys()) == {"alpha", "bravo"}
+    assert app.blogs["alpha"].output_dir == "tumblr_downloads"
+
+
+def test_load_toml_config_options_blogs_with_override(tmp_path: Path) -> None:
+    """A blog in both [options] and [blog.*] uses the override section."""
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(
+        '[options]\nblogs = ["alpha", "bravo"]\n\n'
+        "[blog.alpha]\n"
+        'output_dir = "~/custom"\n'
+    )
+
+    app = load_toml_config(config_file)
+    assert set(app.blogs.keys()) == {"alpha", "bravo"}
+    assert app.blogs["alpha"].output_dir == "~/custom"
+    assert app.blogs["bravo"].output_dir == "tumblr_downloads"
+
+
+def test_load_toml_config_options_blogs_bad_type(tmp_path: Path) -> None:
+    """Non-string items in [options] blogs array raise ConfigError."""
+    config_file = tmp_path / "config.toml"
+    config_file.write_text("[options]\nblogs = [1, 2]\n")
+
+    with pytest.raises(ConfigError, match="must be a list of strings"):
+        load_toml_config(config_file)
+
+
+def test_load_toml_config_options_merges_settings_and_defaults(tmp_path: Path) -> None:
+    """[options] feeds both AppSettings and BlogConfig defaults."""
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(
+        "[options]\n"
+        "debug = true\n"
+        "max_concurrent = 8\n"
+        'output_dir = "media"\n'
+        'exclude_tags = ["nsfw"]\n'
+    )
+
+    app = load_toml_config(config_file)
+    assert app.settings.debug is True
+    assert app.settings.max_concurrent == 8
+    assert app.defaults.output_dir == "media"
+    assert app.defaults.exclude_tags == ["nsfw"]
 
 
 # --- resolve_blog_config ---

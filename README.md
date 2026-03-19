@@ -77,26 +77,22 @@ consumer_secret = "your_consumer_secret"
 oauth_token = "your_oauth_token"
 oauth_token_secret = "your_oauth_token_secret"
 
-# App-level settings
-[settings]
+[options]
 debug = true                    # enable debug logging + auto log file
 # log_file = "~/logs/tumblr-dl.log"  # optional: explicit log file path
 # max_concurrent = 4            # concurrent downloads (1-32, default: 4)
-
-# Global defaults — apply to all blogs unless overridden
-[defaults]
 output_dir = "tumblr_downloads"
 exclude_tags = ["gore*", "explicit"]
 exclude_blogs = ["spambot*"]
+blogs = ["photoblog", "artblog", "travelblog"]
 
-# Per-blog sections
-[blog.myblog]
-output_dir = "~/media/myblog"
+# Per-blog overrides (only needed when diverging from defaults)
+[blog.photoblog]
+output_dir = "~/media/photoblog"
 exclude_tags = ["nsfw"]
 max_posts = 500
 
-[blog.otherblog]
-output_dir = "~/media/otherblog"
+[blog.artblog]
 full_scan = true
 
 [blog.tagwatch]
@@ -105,10 +101,17 @@ output_dir = "~/media/photography"
 max_posts = 200
 ```
 
-All per-blog keys are optional and inherit from `[defaults]`:
+Blogs listed in the `blogs` array use `[options]` defaults. Add a `[blog.<name>]` section
+only when a blog needs settings that differ from the defaults. Blogs that appear in
+a `[blog.*]` section are automatically included — they don't need to be in the array too.
+
+The `[options]` section supports all of the following keys:
 
 | Key | Type | Description |
 |-----|------|-------------|
+| `debug` | boolean | Enable debug logging and auto-create a log file |
+| `log_file` | string | Write debug-level logs to a specific file |
+| `max_concurrent` | integer | Max concurrent downloads, 1–32 (default: 4) |
 | `output_dir` | string | Directory to save media |
 | `exclude_tags` | list | Glob patterns to skip by tag |
 | `exclude_blogs` | list | Glob patterns to skip by reblog source |
@@ -119,14 +122,10 @@ All per-blog keys are optional and inherit from `[defaults]`:
 | `retry_failed` | boolean | Re-download failed items |
 | `no_db` | boolean | Disable SQLite tracking |
 | `db_path` | string | Custom SQLite database path |
+| `blogs` | list | Blog names to download with `--sync` |
 
-The `[settings]` section controls app-level behavior:
-
-| Key | Type | Description |
-|-----|------|-------------|
-| `debug` | boolean | Enable debug logging and auto-create a log file |
-| `log_file` | string | Write debug-level logs to a specific file |
-| `max_concurrent` | integer | Max concurrent downloads, 1–32 (default: 4) |
+Per-blog `[blog.*]` sections support the same keys (except `debug`, `log_file`,
+`max_concurrent`, and `blogs`) and override `[options]` defaults.
 
 ## Usage
 

@@ -838,7 +838,8 @@ async def _run(args: argparse.Namespace) -> int:
                 )
             if not app_config or not app_config.blogs:
                 logger.error(
-                    "No blogs configured. Add [blog.*] sections to your config.toml."
+                    "No blogs configured. Add a 'blogs' list in [options] or "
+                    "[blog.*] sections to your config.toml."
                 )
                 return _EXIT_CONFIG
 

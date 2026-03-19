@@ -261,17 +261,47 @@ def load_toml_config(path: Path) -> AppConfig:
                 oauth_token_secret=str(auth_data["oauth_token_secret"]),
             )
 
-    # Parse [settings] section.
-    settings_data = data.get("settings")
-    if isinstance(settings_data, dict):
-        app.settings = _parse_app_settings(settings_data)
+    # Parse [options] section — merged app settings, blog defaults, and blog list.
+    options_data = data.get("options")
+    if isinstance(options_data, dict):
+        # Split keys: app-level settings vs blog-level defaults.
+        settings_keys = {"debug", "log_file", "max_concurrent"}
+        blog_keys = set(vars(BlogConfig()))
+        settings_part: dict[str, object] = {}
+        defaults_part: dict[str, object] = {}
 
-    # Parse [defaults] section.
-    defaults_data = data.get("defaults")
-    if isinstance(defaults_data, dict):
-        app.defaults = _parse_blog_config(defaults_data, section_name="defaults")
+        for key, value in options_data.items():
+            if key == "blogs":
+                continue  # handled below
+            elif key in settings_keys:
+                settings_part[key] = value
+            elif key in blog_keys:
+                defaults_part[key] = value
+            else:
+                logger.warning(
+                    "Unknown config key '%s' in [options] section (ignored).",
+                    key,
+                )
 
-    # Parse [blog.*] sections.
+        if settings_part:
+            app.settings = _parse_app_settings(settings_part)
+        if defaults_part:
+            app.defaults = _parse_blog_config(defaults_part, section_name="options")
+
+        # Parse blogs array within [options].
+        blogs_array = options_data.get("blogs")
+        if blogs_array is not None:
+            if not isinstance(blogs_array, list) or not all(
+                isinstance(b, str) for b in blogs_array
+            ):
+                raise ConfigError(
+                    "Config key 'options.blogs' must be a list of strings",
+                    context={"value": blogs_array},
+                )
+            for name in blogs_array:
+                app.blogs[name] = BlogConfig()
+
+    # Parse [blog.*] sections — per-blog overrides (also registers the blog).
     blog_data = data.get("blog")
     if isinstance(blog_data, dict):
         for name, section in blog_data.items():
