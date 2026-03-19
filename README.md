@@ -56,6 +56,8 @@ pip install -e .
 tumblr-dl loads OAuth credentials in priority order:
 
 1. **Environment variables** (recommended):
+
+   **Linux/macOS:**
    ```bash
    export TUMBLR_CONSUMER_KEY=your_consumer_key
    export TUMBLR_CONSUMER_SECRET=your_consumer_secret
@@ -63,7 +65,22 @@ tumblr-dl loads OAuth credentials in priority order:
    export TUMBLR_OAUTH_TOKEN_SECRET=your_oauth_token_secret
    ```
 
+   **Windows (PowerShell):**
+   ```powershell
+   $env:TUMBLR_CONSUMER_KEY = "your_consumer_key"
+   $env:TUMBLR_CONSUMER_SECRET = "your_consumer_secret"
+   $env:TUMBLR_OAUTH_TOKEN = "your_oauth_token"
+   $env:TUMBLR_OAUTH_TOKEN_SECRET = "your_oauth_token_secret"
+   ```
+
    You can also use a `.env` file in the working directory (loaded automatically).
+   This is the easiest cross-platform option — just create a `.env` file with:
+   ```
+   TUMBLR_CONSUMER_KEY=your_consumer_key
+   TUMBLR_CONSUMER_SECRET=your_consumer_secret
+   TUMBLR_OAUTH_TOKEN=your_oauth_token
+   TUMBLR_OAUTH_TOKEN_SECRET=your_oauth_token_secret
+   ```
 
 2. **TOML config file** `[auth]` section (see below).
 
