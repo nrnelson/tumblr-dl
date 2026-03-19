@@ -29,11 +29,23 @@ A CLI tool for downloading media (images, videos, audio) from Tumblr blogs using
 
 ## Installation
 
+**Linux/macOS:**
+
 ```bash
 git clone https://github.com/nrnelson/tumblr-dl.git
 cd tumblr-dl
 python -m venv .venv
 source .venv/bin/activate
+pip install -e .
+```
+
+**Windows (PowerShell):**
+
+```powershell
+git clone https://github.com/nrnelson/tumblr-dl.git
+cd tumblr-dl
+python -m venv .venv
+.venv\Scripts\Activate.ps1
 pip install -e .
 ```
 
@@ -76,6 +88,15 @@ Since this file contains OAuth secrets, restrict its permissions:
 ```bash
 chmod 600 ~/.config/tumblr-dl/config.toml
 ```
+
+> **Windows users:** TOML treats backslashes as escape characters in double-quoted
+> strings, so `"C:\Users\..."` will cause a parse error. Use one of these instead:
+>
+> | Style | Example |
+> |-------|---------|
+> | Forward slashes | `output_dir = "C:/Users/User/downloads"` |
+> | Single quotes (no escaping) | `output_dir = 'C:\Users\User\downloads'` |
+> | Escaped backslashes | `output_dir = "C:\\Users\\User\\downloads"` |
 
 ```toml
 [auth]
