@@ -99,7 +99,8 @@ The config file location is platform-aware:
 | Linux/macOS | `~/.config/tumblr-dl/config.toml` |
 | Windows | `%APPDATA%\tumblr-dl\config.toml` |
 
-Set `XDG_CONFIG_HOME` on any platform to override the default.
+Set `TUMBLR_DL_CONFIG` to point to a config file in a non-standard location,
+or `XDG_CONFIG_HOME` to override the base config directory.
 Since this file contains OAuth secrets, restrict its permissions:
 
 ```bash
@@ -199,7 +200,7 @@ Runs all `[blog.*]` sections from your config file. CLI flags override config va
 | Option | Default | Description |
 |--------|---------|-------------|
 | `-o`, `--output-dir DIR` | `tumblr_downloads/` | Directory to save downloaded media |
-| `--config PATH` | auto-discovered | Path to TOML config file |
+| `--config PATH` | auto-discovered | Path to TOML config file (overrides `TUMBLR_DL_CONFIG` env var) |
 | `--start-post N` | `0` | Post offset to start downloading from |
 | `--max-posts N` | *(all)* | Maximum number of posts to process |
 | `--db-path PATH` | `<output_dir>/.tumblr-dl.db` | SQLite database location |

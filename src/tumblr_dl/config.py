@@ -89,11 +89,26 @@ def _platform_config_dir() -> Path:
 
 
 def resolve_config_path() -> Path | None:
-    """Find the TOML config file in the platform config directory.
+    """Find the TOML config file.
+
+    Resolution order:
+    1. ``TUMBLR_DL_CONFIG`` environment variable (if set)
+    2. Platform config directory (``~/.config/tumblr-dl/config.toml``
+       or ``%APPDATA%/tumblr-dl/config.toml``)
 
     Returns:
-        Path to config.toml if it exists, None otherwise.
+        Path to config.toml if found, None otherwise.
     """
+    env_path = os.environ.get("TUMBLR_DL_CONFIG", "")
+    if env_path:
+        path = Path(env_path).expanduser()
+        if path.is_file():
+            return path
+        logger.warning(
+            "TUMBLR_DL_CONFIG points to %s but file does not exist.", path
+        )
+        return None
+
     config_file = _platform_config_dir() / "config.toml"
     if config_file.is_file():
         return config_file
