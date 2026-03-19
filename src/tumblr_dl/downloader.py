@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import abc
+import asyncio
 import logging
 import sys
 from pathlib import Path
 from urllib.parse import urlparse
 
+import aiofiles
 from curl_cffi.requests import AsyncSession
 
 from tumblr_dl.exceptions import DownloadError
@@ -54,7 +56,7 @@ class FilesystemDedup(DedupStrategy):
 
     async def is_duplicate(self, item: MediaItem, dest: Path) -> bool:
         """Check if the destination file already exists."""
-        return dest.exists()
+        return await asyncio.to_thread(dest.exists)
 
     async def record(
         self,
@@ -79,7 +81,7 @@ class SqliteDedup(DedupStrategy):
         """Check DB first, then filesystem as fallback."""
         if await self._tracker.is_downloaded(item.blog_name, item.url):
             return True
-        return dest.exists()
+        return await asyncio.to_thread(dest.exists)
 
     async def record(
         self,
@@ -92,8 +94,9 @@ class SqliteDedup(DedupStrategy):
             return
         tracker = self._tracker
         file_size: int | None = None
-        if status is DownloadStatus.SUCCESS and dest.exists():
-            file_size = dest.stat().st_size
+        if status is DownloadStatus.SUCCESS and await asyncio.to_thread(dest.exists):
+            stat_result = await asyncio.to_thread(dest.stat)
+            file_size = stat_result.st_size
 
         content_labels_str: str | None = None
         if item.content_labels:
@@ -176,9 +179,9 @@ async def _async_download(url: str, dest: Path, blog_name: str) -> None:
                 )
 
             total_bytes = 0
-            with open(tmp, "wb") as f:
+            async with aiofiles.open(tmp, "wb") as f:
                 async for chunk in response.aiter_content():
-                    f.write(chunk)
+                    await f.write(chunk)
                     total_bytes += len(chunk)
 
         # Validate against Content-Length to detect truncated downloads.
@@ -207,7 +210,7 @@ async def _async_download(url: str, dest: Path, blog_name: str) -> None:
                 context={"url": url},
             )
 
-        tmp.rename(dest)
+        await asyncio.to_thread(tmp.rename, dest)
     except BaseException:
         # Catch BaseException (not just Exception) to ensure the .part
         # file is cleaned up on KeyboardInterrupt and SystemExit too.

@@ -312,9 +312,17 @@ default TLS stack is accepted by Tumblr's CDN (unlike pure-Python clients like
 feature is intentionally **not** used — Tumblr's CDN actively blocks browser TLS
 fingerprints and serves HTML error pages instead of media.
 
-Media downloads run concurrently within each API batch (default: 4 parallel
-downloads, configurable via `--max-concurrent`). API pagination stays sequential
-to respect rate limits.
+All file I/O is non-blocking: media writes use
+[aiofiles](https://github.com/Tinche/aiofiles) and filesystem operations
+(stat, rename, mkdir) are offloaded via `asyncio.to_thread()`.
+
+API pagination and media downloads run as a **producer/consumer pipeline**:
+a producer task fetches API pages and extracts media URLs, while a consumer
+task downloads files concurrently (default: 4 parallel downloads, configurable
+via `--max-concurrent`). A bounded prefetch queue (2 batches) lets the
+producer stay ahead of the consumer so the API is never idle while downloads
+are running. The built-in `AsyncRateLimiter` (token bucket, 300 calls/min)
+gates API requests regardless of pipeline depth.
 
 OAuth1 request signing is handled by `oauthlib` directly.
 

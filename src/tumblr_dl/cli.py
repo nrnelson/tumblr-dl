@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import fnmatch
 import logging
 import os
@@ -51,6 +52,9 @@ logger = logging.getLogger(__name__)
 
 # Tumblr API v2 maximum posts per request.
 _BATCH_SIZE = 20
+
+# Max API page batches the producer can prefetch while downloads run.
+_PREFETCH_BATCHES = 2
 
 # Exit codes
 _EXIT_OK = 0
@@ -455,7 +459,6 @@ async def _download_blog(
         TumblrDlError: On unrecoverable API errors.
     """
     stats = DownloadStats()
-    offset = start_offset
 
     # Load the blog cursor for early termination.
     highest_known_id = 0
@@ -473,75 +476,102 @@ async def _download_blog(
 
     run_highest_id = 0
     run_newest_ts = 0
+    queue: asyncio.Queue[list[MediaItem] | None] = asyncio.Queue(
+        maxsize=_PREFETCH_BATCHES,
+    )
 
-    while True:
-        posts = await client.get_posts(blog_name, offset=offset, limit=_BATCH_SIZE)
-        if not posts:
-            logger.info("No more posts found for %s.", blog_name)
-            break
-
-        # Phase 1: Extract media items from all posts in batch (sequential).
-        batch_items: list[MediaItem] = []
-        for post in posts:
-            post_id: int = post["id"]
-            post_ts: int = post.get("timestamp", 0)
-
-            # Early termination: post already seen on a previous run.
-            id_at_or_below_cursor = highest_known_id and post_id <= highest_known_id
-            ts_not_newer = last_known_ts == 0 or post_ts <= last_known_ts
-            if id_at_or_below_cursor and ts_not_newer:
-                logger.info(
-                    "Reached previously seen post %d (cursor: %d, ts: %d). Stopping.",
-                    post_id,
-                    highest_known_id,
-                    last_known_ts,
+    async def _produce() -> None:
+        nonlocal run_highest_id, run_newest_ts
+        offset = start_offset
+        try:
+            while True:
+                posts = await client.get_posts(
+                    blog_name, offset=offset, limit=_BATCH_SIZE
                 )
-                stats.early_stopped = True
-                stats.early_stop_post_id = post_id
+                if not posts:
+                    logger.info("No more posts found for %s.", blog_name)
+                    break
+
+                batch_items: list[MediaItem] = []
+                stop_pagination = False
+
+                for post in posts:
+                    post_id: int = post["id"]
+                    post_ts: int = post.get("timestamp", 0)
+
+                    # Early termination: post already seen on a previous run.
+                    id_at_or_below_cursor = (
+                        highest_known_id and post_id <= highest_known_id
+                    )
+                    ts_not_newer = (
+                        last_known_ts == 0 or post_ts <= last_known_ts
+                    )
+                    if id_at_or_below_cursor and ts_not_newer:
+                        logger.info(
+                            "Reached previously seen post %d "
+                            "(cursor: %d, ts: %d). Stopping.",
+                            post_id,
+                            highest_known_id,
+                            last_known_ts,
+                        )
+                        stats.early_stopped = True
+                        stats.early_stop_post_id = post_id
+                        stop_pagination = True
+                        break
+
+                    run_highest_id = max(run_highest_id, post_id)
+                    run_newest_ts = max(run_newest_ts, post_ts)
+
+                    stats.posts_processed += 1
+                    logger.info(
+                        "Processing post %d (ID: %s, type: %s)...",
+                        stats.posts_processed,
+                        post_id,
+                        post.get("type", "unknown"),
+                    )
+
+                    processed, items = await _process_post(
+                        post,
+                        blog_name,
+                        tracker,
+                        exclude_patterns,
+                        exclude_blog_patterns,
+                    )
+                    batch_items.extend(items)
+
+                    if max_posts and stats.posts_processed >= max_posts:
+                        logger.info(
+                            "Reached maximum posts (%d). Stopping.",
+                            max_posts,
+                        )
+                        stop_pagination = True
+                        break
+
+                if batch_items:
+                    await queue.put(batch_items)
+
+                if stop_pagination:
+                    break
+
+                offset += _BATCH_SIZE
+        finally:
+            with contextlib.suppress(asyncio.CancelledError):
+                await queue.put(None)
+
+    async def _consume() -> None:
+        while True:
+            batch = await queue.get()
+            if batch is None:
                 break
-
-            run_highest_id = max(run_highest_id, post_id)
-            run_newest_ts = max(run_newest_ts, post_ts)
-
-            stats.posts_processed += 1
-            logger.info(
-                "Processing post %d (ID: %s, type: %s)...",
-                stats.posts_processed,
-                post_id,
-                post.get("type", "unknown"),
+            await _download_items_concurrent(
+                batch, output_dir, dedup, stats, semaphore
             )
+            if tracker:
+                await tracker.commit()
 
-            processed, items = await _process_post(
-                post,
-                blog_name,
-                tracker,
-                exclude_patterns,
-                exclude_blog_patterns,
-            )
-            batch_items.extend(items)
-
-            if max_posts and stats.posts_processed >= max_posts:
-                logger.info(
-                    "Reached maximum posts (%d). Stopping.",
-                    max_posts,
-                )
-                break
-
-        # Phase 2: Download all batch items concurrently.
-        await _download_items_concurrent(
-            batch_items, output_dir, dedup, stats, semaphore
-        )
-
-        # Flush tracker writes after each pagination batch.
-        if tracker:
-            await tracker.commit()
-
-        if stats.early_stopped:
-            break
-        if max_posts and stats.posts_processed >= max_posts:
-            break
-
-        offset += _BATCH_SIZE
+    async with asyncio.TaskGroup() as tg:
+        tg.create_task(_produce())
+        tg.create_task(_consume())
 
     # Update the cursor with the high-water mark from this run.
     # Always update last_run_at so we know when we last checked,
@@ -587,69 +617,93 @@ async def _download_tagged(
         Accumulated download statistics.
     """
     stats = DownloadStats()
-    before: int | None = None
+    queue: asyncio.Queue[list[MediaItem] | None] = asyncio.Queue(
+        maxsize=_PREFETCH_BATCHES,
+    )
 
-    while True:
-        posts = await client.get_tagged_posts(tag, before=before, limit=_BATCH_SIZE)
-        if not posts:
-            logger.info("No more tagged posts found for '%s'.", tag)
-            break
-
-        # Phase 1: Extract media items from all posts in batch (sequential).
-        batch_items: list[MediaItem] = []
-        for post in posts:
-            post_id: int = post["id"]
-
-            # The blog name comes from each individual post.
-            post_blog = post.get("blog_name") or post.get("blog", {}).get(
-                "name", "unknown"
-            )
-
-            stats.posts_processed += 1
-            logger.info(
-                "Processing tagged post %d from %s (ID: %s, type: %s)...",
-                stats.posts_processed,
-                post_blog,
-                post_id,
-                post.get("type", "unknown"),
-            )
-
-            processed, items = await _process_post(
-                post,
-                post_blog,
-                tracker,
-                exclude_patterns,
-                exclude_blog_patterns,
-            )
-            batch_items.extend(items)
-
-            if max_posts and stats.posts_processed >= max_posts:
-                logger.info(
-                    "Reached maximum posts (%d). Stopping.",
-                    max_posts,
+    async def _produce() -> None:
+        before: int | None = None
+        try:
+            while True:
+                posts = await client.get_tagged_posts(
+                    tag, before=before, limit=_BATCH_SIZE
                 )
+                if not posts:
+                    logger.info("No more tagged posts found for '%s'.", tag)
+                    break
+
+                batch_items: list[MediaItem] = []
+                stop_pagination = False
+
+                for post in posts:
+                    post_id: int = post["id"]
+
+                    # The blog name comes from each individual post.
+                    post_blog = post.get("blog_name") or post.get(
+                        "blog", {}
+                    ).get("name", "unknown")
+
+                    stats.posts_processed += 1
+                    logger.info(
+                        "Processing tagged post %d from %s "
+                        "(ID: %s, type: %s)...",
+                        stats.posts_processed,
+                        post_blog,
+                        post_id,
+                        post.get("type", "unknown"),
+                    )
+
+                    processed, items = await _process_post(
+                        post,
+                        post_blog,
+                        tracker,
+                        exclude_patterns,
+                        exclude_blog_patterns,
+                    )
+                    batch_items.extend(items)
+
+                    if max_posts and stats.posts_processed >= max_posts:
+                        logger.info(
+                            "Reached maximum posts (%d). Stopping.",
+                            max_posts,
+                        )
+                        stop_pagination = True
+                        break
+
+                if batch_items:
+                    await queue.put(batch_items)
+
+                if stop_pagination:
+                    break
+
+                # Advance cursor: use the timestamp of the last post.
+                last_ts = posts[-1].get("timestamp", 0)
+                if last_ts and last_ts != before:
+                    before = last_ts
+                else:
+                    # No progress — avoid infinite loop.
+                    logger.info(
+                        "Pagination cursor did not advance. Stopping."
+                    )
+                    break
+        finally:
+            with contextlib.suppress(asyncio.CancelledError):
+                await queue.put(None)
+
+    async def _consume() -> None:
+        while True:
+            batch = await queue.get()
+            if batch is None:
                 break
+            await _download_items_concurrent(
+                batch, output_dir, dedup, stats, semaphore
+            )
+            if tracker:
+                await tracker.commit()
 
-        # Phase 2: Download all batch items concurrently.
-        await _download_items_concurrent(
-            batch_items, output_dir, dedup, stats, semaphore
-        )
-
-        # Flush tracker writes after each pagination batch.
-        if tracker:
-            await tracker.commit()
-
-        if max_posts and stats.posts_processed >= max_posts:
-            break
-
-        # Advance cursor: use the timestamp of the last post in the batch.
-        last_ts = posts[-1].get("timestamp", 0)
-        if last_ts and last_ts != before:
-            before = last_ts
-        else:
-            # No progress — avoid infinite loop.
-            logger.info("Pagination cursor did not advance. Stopping.")
-            break
+    async with asyncio.TaskGroup() as tg:
+        tg.create_task(_produce())
+        tg.create_task(_consume())
 
     return stats
 
@@ -685,7 +739,7 @@ async def _run_blog_download(
         blog_config.exclude_blogs,
     )
     output_dir = Path(blog_config.output_dir).expanduser()
-    output_dir.mkdir(parents=True, exist_ok=True)
+    await asyncio.to_thread(output_dir.mkdir, parents=True, exist_ok=True)
 
     # Normalize patterns (lowercase/strip) — needed for TOML-sourced values
     # that bypass CLI parsing.
@@ -740,7 +794,7 @@ async def _setup_tracker_and_dedup(
     db_path = Path(
         blog_config.db_path if blog_config.db_path else output_dir / ".tumblr-dl.db"
     )
-    db_path.parent.mkdir(parents=True, exist_ok=True)
+    await asyncio.to_thread(db_path.parent.mkdir, parents=True, exist_ok=True)
     tracker = DownloadTracker(db_path)
     await tracker.open()
     return tracker, SqliteDedup(tracker)
@@ -901,7 +955,9 @@ async def _run(args: argparse.Namespace) -> int:
                     tracker, dedup = await _setup_tracker_and_dedup(base_config)
                     try:
                         output_dir = Path(base_config.output_dir).expanduser()
-                        output_dir.mkdir(parents=True, exist_ok=True)
+                        await asyncio.to_thread(
+                            output_dir.mkdir, parents=True, exist_ok=True
+                        )
                         exclude_patterns = _parse_exclude_patterns(
                             base_config.exclude_tags
                         )

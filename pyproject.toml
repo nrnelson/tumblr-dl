@@ -29,6 +29,7 @@ dependencies = [
     "beautifulsoup4>=4.12,<5.0",
     "python-dotenv>=1.0,<2.0",
     "aiosqlite>=0.20,<1.0",
+    "aiofiles>=24.1,<25.0",
 ]
 
 [project.urls]
@@ -46,7 +47,7 @@ dev = [
     "pre-commit>=3.0",
     "types-oauthlib>=3.2",
     "types-beautifulsoup4>=4.12",
-    "types-aiosqlite>=0.20",
+    "types-aiofiles>=24.1",
 ]
 
 [project.scripts]
