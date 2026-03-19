@@ -870,7 +870,19 @@ async def _run(args: argparse.Namespace) -> int:
     config_path = Path(args.config) if args.config else resolve_config_path()
     app_config: AppConfig | None = None
     if config_path:
-        app_config = load_toml_config(config_path)
+        try:
+            app_config = load_toml_config(config_path)
+        except ConfigError as exc:
+            logger.error("%s", exc)
+            if "Invalid TOML" in str(exc) and sys.platform == "win32":
+                logger.error(
+                    "Hint: backslashes in TOML strings are escape characters. "
+                    "Use forward slashes (C:/Users/...), doubled backslashes "
+                    "(C:\\\\Users\\\\...), or single-quoted strings "
+                    "('C:\\Users\\...') for Windows paths."
+                )
+            logger.debug("Error context: %s", exc.context)
+            return _EXIT_CONFIG
 
     settings = app_config.settings if app_config else AppSettings()
     debug, log_file = _resolve_logging_settings(args, settings)
