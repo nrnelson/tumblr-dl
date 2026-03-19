@@ -7,7 +7,7 @@ import time
 
 import pytest
 
-from tumblr_dl.ratelimit import AsyncRateLimiter
+from tumblr_dl.ratelimit import AsyncRateLimiter, CompoundRateLimiter
 
 
 @pytest.mark.asyncio
@@ -99,3 +99,72 @@ async def test_concurrent_acquires_are_serialized() -> None:
     assert spread_first_3 < 0.1
     # Last 2 should be delayed.
     assert results[4] - results[0] >= 0.1
+
+
+# --- drain tests ---
+
+
+@pytest.mark.asyncio
+async def test_drain_empties_tokens() -> None:
+    """Drain forces the next acquire to wait for refill."""
+    limiter = AsyncRateLimiter(max_calls=10, period=1.0)
+
+    await limiter.drain()
+
+    start = time.monotonic()
+    await limiter.acquire()
+    elapsed = time.monotonic() - start
+
+    assert elapsed >= 0.05, f"Should block after drain, only waited {elapsed:.3f}s"
+
+
+# --- CompoundRateLimiter tests ---
+
+
+@pytest.mark.asyncio
+async def test_compound_respects_strictest_limiter() -> None:
+    """Compound limiter blocks when the stricter limiter is exhausted."""
+    # Fast limiter: 3/s, slow limiter: 100/s (effectively unlimited).
+    compound = CompoundRateLimiter([
+        AsyncRateLimiter(max_calls=3, period=1.0),
+        AsyncRateLimiter(max_calls=100, period=1.0),
+    ])
+
+    for _ in range(3):
+        await compound.acquire()
+
+    start = time.monotonic()
+    await compound.acquire()
+    elapsed = time.monotonic() - start
+
+    assert elapsed >= 0.1, "Should be limited by the stricter (3/s) limiter"
+
+
+@pytest.mark.asyncio
+async def test_compound_drain_empties_all() -> None:
+    """Drain empties all sub-limiters."""
+    compound = CompoundRateLimiter([
+        AsyncRateLimiter(max_calls=10, period=1.0),
+        AsyncRateLimiter(max_calls=10, period=1.0),
+    ])
+
+    await compound.drain()
+
+    start = time.monotonic()
+    await compound.acquire()
+    elapsed = time.monotonic() - start
+
+    assert elapsed >= 0.05, "Both limiters should be drained"
+
+
+@pytest.mark.asyncio
+async def test_tumblr_default_factory() -> None:
+    """Factory creates a working compound limiter."""
+    limiter = CompoundRateLimiter.tumblr_default(per_minute=5, per_hour=100)
+
+    start = time.monotonic()
+    for _ in range(5):
+        await limiter.acquire()
+    elapsed = time.monotonic() - start
+
+    assert elapsed < 0.1, "First 5 calls should not block"

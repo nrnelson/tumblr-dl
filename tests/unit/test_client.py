@@ -10,7 +10,6 @@ import pytest
 from tumblr_dl.client import TumblrClient, _normalize_blog_name
 from tumblr_dl.config import AuthCredentials
 from tumblr_dl.exceptions import ApiError
-from tumblr_dl.ratelimit import AsyncRateLimiter
 
 _TEST_AUTH = AuthCredentials(
     consumer_key="ck",
@@ -46,6 +45,7 @@ def _make_mock_response(json_data: dict[str, Any], status_code: int = 200) -> Ma
     resp = MagicMock()
     resp.status_code = status_code
     resp.json.return_value = json_data
+    resp.headers = {}
     resp.raise_for_status = MagicMock()
     if status_code >= 400:
         resp.raise_for_status.side_effect = Exception(f"HTTP {status_code}")
@@ -53,13 +53,20 @@ def _make_mock_response(json_data: dict[str, Any], status_code: int = 200) -> Ma
 
 
 def _stub_client() -> TumblrClient:
-    """Create a TumblrClient with mocked internals (no real config)."""
+    """Create a TumblrClient with mocked internals (no real config).
+
+    Uses a mock limiter so tests don't interact with real token-bucket
+    timing (which breaks when asyncio.sleep is patched).
+    """
     with patch.object(TumblrClient, "__init__", lambda self, *a, **kw: None):
         client = TumblrClient.__new__(TumblrClient)
         client._oauth = MagicMock()
         client._oauth.sign.return_value = ("https://signed.url", {}, "")
         client._session = AsyncMock()
-        client._limiter = AsyncRateLimiter(max_calls=1000, period=60.0)
+        limiter = AsyncMock()
+        limiter.acquire = AsyncMock()
+        limiter.drain = AsyncMock()
+        client._limiter = limiter
         client._rate_limit = 300
         client.api_calls = 0
         return client
@@ -183,16 +190,56 @@ async def test_retry_exhausted_raises_api_error() -> None:
 
 
 @pytest.mark.asyncio
-async def test_retry_backoff_is_exponential() -> None:
-    """429 retries use exponential backoff delays."""
+async def test_retry_429_uses_reset_header() -> None:
+    """429 retries use the x-ratelimit-perhour-reset header for delay."""
+    resp_429 = _make_mock_response({}, status_code=429)
+    resp_429.headers = {
+        "x-ratelimit-perhour-remaining": "0",
+        "x-ratelimit-perhour-reset": "1800",
+        "x-ratelimit-perday-remaining": "4000",
+        "x-ratelimit-perday-reset": "80000",
+    }
+    posts = [{"id": 1}]
+    resp_200 = _make_mock_response({"response": {"posts": posts}})
+
+    client = _stub_client()
+    client._session.get = AsyncMock(side_effect=[resp_429, resp_200])
+
+    with patch("tumblr_dl.client.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+        result = await client.get_posts("testblog")
+
+    assert result == posts
+    # Should wait reset time (1800) + 5s buffer = 1805s.
+    assert mock_sleep.call_args_list[0][0][0] == 1805.0
+
+
+@pytest.mark.asyncio
+async def test_retry_429_falls_back_to_base_delay() -> None:
+    """429 without reset headers falls back to base delay."""
     resp_429 = _make_mock_response({}, status_code=429)
     posts = [{"id": 1}]
     resp_200 = _make_mock_response({"response": {"posts": posts}})
 
-    # Fail 3 times, succeed on 4th.
+    client = _stub_client()
+    client._session.get = AsyncMock(side_effect=[resp_429, resp_200])
+
+    with patch("tumblr_dl.client.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+        result = await client.get_posts("testblog")
+
+    assert result == posts
+    assert mock_sleep.call_args_list[0][0][0] == 30.0
+
+
+@pytest.mark.asyncio
+async def test_retry_5xx_uses_exponential_backoff() -> None:
+    """5xx retries still use exponential backoff."""
+    resp_500 = _make_mock_response({}, status_code=500)
+    posts = [{"id": 1}]
+    resp_200 = _make_mock_response({"response": {"posts": posts}})
+
     client = _stub_client()
     client._session.get = AsyncMock(
-        side_effect=[resp_429, resp_429, resp_429, resp_200]
+        side_effect=[resp_500, resp_500, resp_500, resp_200]
     )
 
     with patch("tumblr_dl.client.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
@@ -201,3 +248,53 @@ async def test_retry_backoff_is_exponential() -> None:
     assert result == posts
     delays = [call[0][0] for call in mock_sleep.call_args_list]
     assert delays == [30.0, 60.0, 120.0]
+
+
+# --- Proactive rate-limit pause tests ---
+
+
+@pytest.mark.asyncio
+async def test_proactive_pause_on_low_remaining() -> None:
+    """Proactively pauses when remaining calls are near zero."""
+    posts = [{"id": 1}]
+    resp = _make_mock_response({"response": {"posts": posts}})
+    resp.headers = {
+        "x-ratelimit-perhour-remaining": "3",
+        "x-ratelimit-perhour-reset": "900",
+        "x-ratelimit-perday-remaining": "4500",
+        "x-ratelimit-perday-reset": "80000",
+    }
+
+    client = _stub_client()
+    client._session.get = AsyncMock(return_value=resp)
+
+    with patch("tumblr_dl.client.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+        result = await client.get_posts("testblog")
+
+    assert result == posts
+    # Should pause for reset (900) + 5s buffer.
+    mock_sleep.assert_awaited_once_with(905.0)
+    # Should also drain the limiter.
+    client._limiter.drain.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_no_pause_when_remaining_is_healthy() -> None:
+    """No proactive pause when remaining calls are above threshold."""
+    posts = [{"id": 1}]
+    resp = _make_mock_response({"response": {"posts": posts}})
+    resp.headers = {
+        "x-ratelimit-perhour-remaining": "500",
+        "x-ratelimit-perhour-reset": "1800",
+        "x-ratelimit-perday-remaining": "4000",
+        "x-ratelimit-perday-reset": "80000",
+    }
+
+    client = _stub_client()
+    client._session.get = AsyncMock(return_value=resp)
+
+    with patch("tumblr_dl.client.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+        result = await client.get_posts("testblog")
+
+    assert result == posts
+    mock_sleep.assert_not_awaited()

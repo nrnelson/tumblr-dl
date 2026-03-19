@@ -12,7 +12,7 @@ from oauthlib.oauth1 import Client as OAuth1Client
 
 from tumblr_dl.config import AuthCredentials
 from tumblr_dl.exceptions import ApiError
-from tumblr_dl.ratelimit import AsyncRateLimiter
+from tumblr_dl.ratelimit import CompoundRateLimiter
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +22,98 @@ _API_BASE = "https://api.tumblr.com/v2"
 _RETRY_MAX_ATTEMPTS = 4
 _RETRY_BASE_DELAY = 30.0
 _RETRY_MAX_DELAY = 300.0
+
+
+def _log_ratelimit_headers(headers: Any) -> None:
+    """Log any X-RateLimit-* headers from the API response.
+
+    Tumblr sends headers like ``x-ratelimit-perhour-remaining`` and
+    ``x-ratelimit-perhour-reset`` (seconds until window resets).
+    """
+    for key in headers:
+        if str(key).lower().startswith("x-ratelimit"):
+            logger.debug("Rate-limit header: %s: %s", key, headers[key])
+
+
+def _extract_reset_delay(headers: Any) -> float:
+    """Determine how long to wait from rate-limit response headers.
+
+    Checks ``x-ratelimit-perhour-reset`` and ``x-ratelimit-perday-reset``
+    headers (values are seconds until the window resets). Uses the
+    shortest non-zero reset if the corresponding ``remaining`` is 0.
+
+    Falls back to ``_RETRY_BASE_DELAY`` if no usable header is found.
+    """
+    best: float | None = None
+
+    for window in ("perhour", "perday"):
+        remaining_key = f"x-ratelimit-{window}-remaining"
+        reset_key = f"x-ratelimit-{window}-reset"
+
+        remaining_val = _header_int(headers, remaining_key)
+        reset_val = _header_int(headers, reset_key)
+
+        if remaining_val is not None and remaining_val <= 0 and reset_val:
+            # This window is exhausted — use its reset time.
+            # Add a small buffer to avoid hitting the boundary.
+            reset_seconds = float(reset_val) + 5.0
+            if best is None or reset_seconds < best:
+                best = reset_seconds
+
+    if best is not None:
+        logger.info(
+            "Rate limit exhausted. Waiting %.0fs (from reset header).",
+            best,
+        )
+        return best
+
+    return _RETRY_BASE_DELAY
+
+
+def _header_int(headers: Any, key: str) -> int | None:
+    """Safely extract an integer value from a response header."""
+    val = headers.get(key)
+    if val is None:
+        return None
+    try:
+        return int(val)
+    except (ValueError, TypeError):
+        return None
+
+
+# Pause proactively when remaining calls drop to this threshold.
+_REMAINING_THRESHOLD = 5
+
+
+def _check_remaining(headers: Any) -> float | None:
+    """Check rate-limit remaining headers and return a delay if near zero.
+
+    Called after every successful response. If any window's remaining
+    count is at or below the threshold, returns the reset time so the
+    caller can sleep before the next request.
+
+    Returns:
+        Seconds to wait, or None if no pause is needed.
+    """
+    for window in ("perhour", "perday"):
+        remaining_key = f"x-ratelimit-{window}-remaining"
+        reset_key = f"x-ratelimit-{window}-reset"
+
+        remaining = _header_int(headers, remaining_key)
+        reset = _header_int(headers, reset_key)
+
+        if remaining is not None and remaining <= _REMAINING_THRESHOLD and reset:
+            delay = float(reset) + 5.0
+            logger.warning(
+                "Rate limit nearly exhausted (%s: %d remaining). "
+                "Pausing for %.0fs until window resets.",
+                window,
+                remaining,
+                delay,
+            )
+            return delay
+
+    return None
 
 
 def _normalize_blog_name(blog_name: str) -> str:
@@ -43,11 +135,13 @@ class TumblrClient:
 
     Uses curl_cffi for native async HTTP with TLS compatibility,
     and oauthlib for OAuth1 request signing. Includes a built-in
-    rate limiter (300 calls/min) and 429 backoff/retry.
+    compound rate limiter (300 calls/min + 1,000 calls/hour) and
+    429 backoff/retry with bucket drain.
 
     Args:
         auth: Pre-resolved OAuth credentials.
         rate_limit: Maximum API calls per minute (default: 300).
+        rate_limit_hourly: Maximum API calls per hour (default: 1000).
 
     Usage::
 
@@ -59,6 +153,7 @@ class TumblrClient:
         self,
         auth: AuthCredentials,
         rate_limit: int = 300,
+        rate_limit_hourly: int = 1000,
     ) -> None:
         self._oauth = OAuth1Client(
             auth.consumer_key,
@@ -67,7 +162,9 @@ class TumblrClient:
             resource_owner_secret=auth.oauth_token_secret,
         )
         self._session: AsyncSession = AsyncSession()  # type: ignore[type-arg]
-        self._limiter = AsyncRateLimiter(max_calls=rate_limit, period=60.0)
+        self._limiter = CompoundRateLimiter.tumblr_default(
+            per_minute=rate_limit, per_hour=rate_limit_hourly,
+        )
         self._rate_limit = rate_limit
         self.api_calls: int = 0
 
@@ -153,11 +250,22 @@ class TumblrClient:
             self.api_calls += 1
             logger.debug("API response: %d", response.status_code)
 
+            # Log any rate-limit headers Tumblr sends (undocumented
+            # but useful for debugging).
+            _log_ratelimit_headers(response.headers)
+
             if response.status_code == 429 or response.status_code >= 500:
-                delay = min(
-                    _RETRY_BASE_DELAY * (2**attempt),
-                    _RETRY_MAX_DELAY,
-                )
+                if response.status_code == 429:
+                    delay = _extract_reset_delay(response.headers)
+                    # Drain token buckets so refill starts from zero
+                    # during the backoff sleep — prevents a burst of
+                    # requests immediately after waking.
+                    await self._limiter.drain()
+                else:
+                    delay = min(
+                        _RETRY_BASE_DELAY * (2**attempt),
+                        _RETRY_MAX_DELAY,
+                    )
                 logger.warning(
                     "Server returned %d. Retrying in %.0fs (attempt %d/%d).",
                     response.status_code,
@@ -180,6 +288,14 @@ class TumblrClient:
                     f"API returned {status or response.status_code}",
                     context={**ctx, "status_code": status or response.status_code},
                 ) from exc
+
+            # Proactively pause if any rate-limit window is nearly
+            # exhausted, rather than burning remaining calls and
+            # getting 429'd.
+            preemptive_delay = _check_remaining(response.headers)
+            if preemptive_delay:
+                await self._limiter.drain()
+                await asyncio.sleep(preemptive_delay)
 
             return response.json()
 
