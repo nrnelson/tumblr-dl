@@ -19,6 +19,13 @@ from tumblr_dl.utils import sanitize_filename
 
 logger = logging.getLogger(__name__)
 
+# Media download retry: short backoff for transient CDN failures (HTTP 0,
+# connection resets). Shorter delays than API retry since these are CDN
+# fetches, not rate-limited API calls.
+_DL_RETRY_ATTEMPTS = 3
+_DL_RETRY_BASE_DELAY = 5.0
+_DL_RETRY_MAX_DELAY = 30.0
+
 # Manual User-Agent string. curl_cffi's impersonate feature triggers Tumblr's
 # CDN to serve HTML error pages instead of media — the browser TLS fingerprints
 # are actively blocked. curl_cffi's *default* TLS stack (non-impersonated) is
@@ -154,6 +161,10 @@ async def _async_download(url: str, dest: Path, blog_name: str) -> int:
     issues (stale keep-alive connections cause IncompleteRead / ConnectionError
     on Tumblr's CDN).
 
+    Retries on transient connection failures (HTTP 0, connection resets,
+    timeouts) with exponential backoff. Content-level errors (HTML
+    responses, empty files, HTTP 4xx) are not retried.
+
     Streams the response to a temporary file, then renames on success.
 
     Returns:
@@ -164,62 +175,116 @@ async def _async_download(url: str, dest: Path, blog_name: str) -> int:
         "Referer": f"https://{blog_name}.tumblr.com/",
     }
     tmp = dest.with_suffix(dest.suffix + ".part")
-    try:
-        # Fresh session per download — curl_cffi's shared session reuses
-        # keep-alive connections that Tumblr's CDN resets mid-transfer.
-        async with (
-            AsyncSession() as session,
-            session.stream("GET", url, headers=headers, timeout=(30, 300)) as response,
-        ):
-            response.raise_for_status()
+    last_exc: Exception | None = None
 
-            # Reject HTML error pages served with 200 status.
-            content_type = response.headers.get("content-type", "")
-            if "text/html" in content_type:
-                raise DownloadError(
-                    f"Server returned HTML instead of media: {url}",
-                    context={"url": url, "content_type": content_type},
+    for attempt in range(_DL_RETRY_ATTEMPTS):
+        try:
+            # Fresh session per download — curl_cffi's shared session reuses
+            # keep-alive connections that Tumblr's CDN resets mid-transfer.
+            async with (
+                AsyncSession() as session,
+                session.stream(
+                    "GET", url, headers=headers, timeout=(30, 300)
+                ) as response,
+            ):
+                # Check for HTTP errors. Non-retryable client errors (4xx)
+                # are raised immediately; server errors (5xx) are retried.
+                status_code = response.status_code
+                if status_code >= 400:
+                    if status_code < 500:
+                        raise DownloadError(
+                            f"HTTP {status_code}: {url}",
+                            context={
+                                "url": url,
+                                "status_code": status_code,
+                            },
+                        )
+                    raise _TransientError(
+                        f"HTTP {status_code}", status_code=status_code
+                    )
+
+                # Reject HTML error pages served with 200 status.
+                content_type = response.headers.get("content-type", "")
+                if "text/html" in content_type:
+                    raise DownloadError(
+                        f"Server returned HTML instead of media: {url}",
+                        context={"url": url, "content_type": content_type},
+                    )
+
+                total_bytes = 0
+                async with aiofiles.open(tmp, "wb") as f:
+                    async for chunk in response.aiter_content():
+                        await f.write(chunk)
+                        total_bytes += len(chunk)
+
+            # Validate against Content-Length to detect truncated downloads.
+            expected = response.headers.get("content-length")
+            if expected is not None and total_bytes != int(expected):
+                raise _TransientError(
+                    f"Incomplete: {total_bytes}/{expected} bytes",
+                    status_code=0,
                 )
 
-            total_bytes = 0
-            async with aiofiles.open(tmp, "wb") as f:
-                async for chunk in response.aiter_content():
-                    await f.write(chunk)
-                    total_bytes += len(chunk)
-
-        # Validate against Content-Length to detect truncated downloads.
-        expected = response.headers.get("content-length")
-        if expected is not None and total_bytes != int(expected):
-            raise DownloadError(
-                f"Incomplete download: got {total_bytes} bytes, "
-                f"expected {expected}: {url}",
-                context={
-                    "url": url,
-                    "expected_bytes": int(expected),
-                    "actual_bytes": total_bytes,
-                },
+            logger.debug(
+                "Downloaded %d bytes (content-type: %s) for %s: %s",
+                total_bytes,
+                content_type,
+                blog_name,
+                url,
             )
+            if total_bytes == 0:
+                raise DownloadError(
+                    f"Downloaded file is empty (0 bytes): {url}",
+                    context={"url": url},
+                )
 
-        logger.debug(
-            "Downloaded %d bytes (content-type: %s) for %s: %s",
-            total_bytes,
-            content_type,
-            blog_name,
-            url,
-        )
-        if total_bytes == 0:
-            raise DownloadError(
-                f"Downloaded file is empty (0 bytes): {url}",
-                context={"url": url},
+            await asyncio.to_thread(tmp.rename, dest)
+            return total_bytes
+
+        except (DownloadError, KeyboardInterrupt, SystemExit):
+            # Non-retryable: content errors, user interrupt.
+            tmp.unlink(missing_ok=True)
+            raise
+
+        except (_TransientError, ConnectionError, OSError) as exc:
+            # Retryable: connection resets, timeouts, HTTP 5xx, truncated.
+            tmp.unlink(missing_ok=True)
+            delay = min(
+                _DL_RETRY_BASE_DELAY * (2**attempt), _DL_RETRY_MAX_DELAY
             )
+            last_exc = exc
+            if attempt + 1 < _DL_RETRY_ATTEMPTS:
+                logger.debug(
+                    "Download failed (%s), retrying in %.0fs "
+                    "(attempt %d/%d): %s",
+                    exc,
+                    delay,
+                    attempt + 1,
+                    _DL_RETRY_ATTEMPTS,
+                    url,
+                )
+                await asyncio.sleep(delay)
+            # else: fall through to raise after loop
 
-        await asyncio.to_thread(tmp.rename, dest)
-        return total_bytes
-    except BaseException:
-        # Catch BaseException (not just Exception) to ensure the .part
-        # file is cleaned up on KeyboardInterrupt and SystemExit too.
-        tmp.unlink(missing_ok=True)
-        raise
+        except BaseException:
+            # Unexpected errors: clean up .part file and propagate.
+            tmp.unlink(missing_ok=True)
+            raise
+
+    # All retries exhausted.
+    tmp.unlink(missing_ok=True)
+    raise DownloadError(
+        f"Download failed after {_DL_RETRY_ATTEMPTS} attempts: {url}",
+        context={"url": url, "last_error": str(last_exc)},
+    )
+
+
+class _TransientError(Exception):
+    """Internal marker for retryable download failures."""
+
+    def __init__(self, message: str, *, status_code: int) -> None:
+        super().__init__(message)
+        self.status_code = status_code
 
 
 async def download_item(
