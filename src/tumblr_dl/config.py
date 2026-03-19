@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -69,19 +70,31 @@ class AppConfig:
     blogs: dict[str, BlogConfig] = field(default_factory=dict)
 
 
+def _platform_config_dir() -> Path:
+    """Return the platform-appropriate config directory for tumblr-dl.
+
+    Resolution order:
+    1. ``$XDG_CONFIG_HOME/tumblr-dl`` (if set, any platform)
+    2. ``%APPDATA%/tumblr-dl`` (Windows default)
+    3. ``~/.config/tumblr-dl`` (Unix/macOS default)
+    """
+    xdg = os.environ.get("XDG_CONFIG_HOME", "")
+    if xdg:
+        return Path(xdg) / "tumblr-dl"
+    if sys.platform == "win32":
+        appdata = os.environ.get("APPDATA", "")
+        if appdata:
+            return Path(appdata) / "tumblr-dl"
+    return Path.home() / ".config" / "tumblr-dl"
+
+
 def resolve_config_path() -> Path | None:
-    """Find the TOML config file via XDG_CONFIG_HOME.
+    """Find the TOML config file in the platform config directory.
 
     Returns:
         Path to config.toml if it exists, None otherwise.
     """
-    xdg = os.environ.get("XDG_CONFIG_HOME", "")
-    if xdg:
-        config_dir = Path(xdg) / "tumblr-dl"
-    else:
-        config_dir = Path.home() / ".config" / "tumblr-dl"
-
-    config_file = config_dir / "config.toml"
+    config_file = _platform_config_dir() / "config.toml"
     if config_file.is_file():
         return config_file
     return None
@@ -223,7 +236,7 @@ def load_toml_config(path: Path) -> AppConfig:
         ConfigError: If the file is missing or invalid.
     """
     try:
-        data = tomllib.loads(path.read_text())
+        data = tomllib.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError as exc:
         raise ConfigError(
             f"Config file not found: {path}",

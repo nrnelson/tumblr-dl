@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import abc
 import logging
+import sys
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -114,10 +115,33 @@ class SqliteDedup(DedupStrategy):
 
 
 def _resolve_path(item: MediaItem, output_dir: Path) -> Path:
-    """Determine the local file path for a media item."""
+    """Determine the local file path for a media item.
+
+    On Windows, truncates the filename further if the full path would
+    exceed 260 characters (MAX_PATH), leaving room for the ``.part``
+    suffix used during downloads.
+    """
     raw_name = Path(urlparse(item.url).path).name
     safe_name = sanitize_filename(raw_name)
-    return output_dir / safe_name
+    dest = output_dir / safe_name
+
+    # Windows MAX_PATH is 260 (including NUL terminator → 259 usable).
+    # Reserve 5 extra chars for the ".part" temp suffix.
+    if sys.platform == "win32":
+        max_path = 259
+        part_suffix_len = 5  # len(".part")
+        full_len = len(str(dest.resolve())) + part_suffix_len
+        if full_len > max_path:
+            overflow = full_len - max_path
+            stem = dest.stem
+            ext = dest.suffix
+            truncated_stem = stem[: len(stem) - overflow]
+            if not truncated_stem:
+                truncated_stem = sanitize_filename(raw_name, max_length=8)
+                truncated_stem = Path(truncated_stem).stem
+            dest = output_dir / (truncated_stem + ext)
+
+    return dest
 
 
 async def _async_download(url: str, dest: Path, blog_name: str) -> None:

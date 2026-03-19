@@ -87,6 +87,21 @@ def test_resolve_config_path_none_when_missing(
     assert resolve_config_path() is None
 
 
+def test_resolve_config_path_windows_appdata(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """On Windows without XDG, uses %APPDATA%/tumblr-dl."""
+    config_dir = tmp_path / "tumblr-dl"
+    config_dir.mkdir()
+    config_file = config_dir / "config.toml"
+    config_file.write_text("[auth]\n")
+
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    monkeypatch.setattr("tumblr_dl.config.sys.platform", "win32")
+    monkeypatch.setenv("APPDATA", str(tmp_path))
+    assert resolve_config_path() == config_file
+
+
 # --- load_auth ---
 
 
@@ -276,6 +291,18 @@ def test_load_toml_config_options_merges_settings_and_defaults(tmp_path: Path) -
     assert app.settings.max_concurrent == 8
     assert app.defaults.output_dir == "media"
     assert app.defaults.exclude_tags == ["nsfw"]
+
+
+def test_load_toml_config_utf8_content(tmp_path: Path) -> None:
+    """Config with non-ASCII content loads correctly via UTF-8."""
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(
+        '[options]\noutput_dir = "日本語フォルダ"\n',
+        encoding="utf-8",
+    )
+
+    app = load_toml_config(config_file)
+    assert app.defaults.output_dir == "日本語フォルダ"
 
 
 # --- resolve_blog_config ---

@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 from unittest.mock import AsyncMock, patch
+
+import pytest
 
 from tumblr_dl.cli import (
     _collect_trail_blogs,
     _download_items_concurrent,
     _matches_exclusion,
     _parse_exclude_patterns,
+    _resolve_log_dir,
 )
 from tumblr_dl.models import (
     DownloadStats,
@@ -19,6 +23,33 @@ from tumblr_dl.models import (
     PostMetadata,
     TrailEntry,
 )
+
+# --- _resolve_log_dir ---
+
+
+def test_resolve_log_dir_xdg(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Uses XDG_STATE_HOME when set."""
+    monkeypatch.setenv("XDG_STATE_HOME", "/custom/state")
+    result = _resolve_log_dir()
+    assert result == Path("/custom/state/tumblr-dl/logs")
+
+
+def test_resolve_log_dir_unix_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Falls back to ~/.local/state on non-Windows."""
+    monkeypatch.delenv("XDG_STATE_HOME", raising=False)
+    monkeypatch.setattr("tumblr_dl.cli.sys.platform", "linux")
+    result = _resolve_log_dir()
+    assert result == Path.home() / ".local" / "state" / "tumblr-dl" / "logs"
+
+
+def test_resolve_log_dir_windows(monkeypatch: pytest.MonkeyPatch) -> None:
+    """On Windows without XDG, uses %LOCALAPPDATA%."""
+    monkeypatch.delenv("XDG_STATE_HOME", raising=False)
+    monkeypatch.setattr("tumblr_dl.cli.sys.platform", "win32")
+    monkeypatch.setenv("LOCALAPPDATA", "C:\\Users\\test\\AppData\\Local")
+    result = _resolve_log_dir()
+    assert result == Path("C:\\Users\\test\\AppData\\Local") / "tumblr-dl" / "logs"
+
 
 # --- _parse_exclude_patterns ---
 

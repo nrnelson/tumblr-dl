@@ -63,7 +63,14 @@ To obtain credentials:
 
 ### Config File
 
-Create `~/.config/tumblr-dl/config.toml` (or set `XDG_CONFIG_HOME`).
+The config file location is platform-aware:
+
+| Platform | Default Location |
+|----------|-----------------|
+| Linux/macOS | `~/.config/tumblr-dl/config.toml` |
+| Windows | `%APPDATA%\tumblr-dl\config.toml` |
+
+Set `XDG_CONFIG_HOME` on any platform to override the default.
 Since this file contains OAuth secrets, restrict its permissions:
 
 ```bash
@@ -196,7 +203,8 @@ Download the first 100 posts with debug output (log file auto-created):
 
 ```bash
 tumblr-dl myblog --max-posts 100 --debug
-# Log written to ~/.local/state/tumblr-dl/logs/tumblr-dl-YYYYMMDD-HHMMSS.log
+# Linux/macOS: ~/.local/state/tumblr-dl/logs/tumblr-dl-YYYYMMDD-HHMMSS.log
+# Windows:     %LOCALAPPDATA%\tumblr-dl\logs\tumblr-dl-YYYYMMDD-HHMMSS.log
 ```
 
 Sync all configured blogs from config.toml:

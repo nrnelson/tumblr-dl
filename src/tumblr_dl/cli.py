@@ -161,13 +161,21 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def _resolve_log_dir() -> Path:
-    """Return the XDG-compliant log directory.
+    """Return the platform-appropriate log directory.
 
-    Uses ``$XDG_STATE_HOME/tumblr-dl/logs/`` (defaults to
-    ``~/.local/state/tumblr-dl/logs/``).
+    Resolution order:
+    1. ``$XDG_STATE_HOME/tumblr-dl/logs/`` (if set, any platform)
+    2. ``%LOCALAPPDATA%/tumblr-dl/logs/`` (Windows default)
+    3. ``~/.local/state/tumblr-dl/logs/`` (Unix/macOS default)
     """
     xdg = os.environ.get("XDG_STATE_HOME", "")
-    base = Path(xdg) if xdg else Path.home() / ".local" / "state"
+    if xdg:
+        base = Path(xdg)
+    elif sys.platform == "win32":
+        localappdata = os.environ.get("LOCALAPPDATA", "")
+        base = Path(localappdata) if localappdata else Path.home() / ".local" / "state"
+    else:
+        base = Path.home() / ".local" / "state"
     return base / "tumblr-dl" / "logs"
 
 
