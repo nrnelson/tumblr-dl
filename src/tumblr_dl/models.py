@@ -6,6 +6,14 @@ import enum
 from dataclasses import dataclass, field
 
 
+class DedupResult(enum.Enum):
+    """Why a media item was considered a duplicate (or not)."""
+
+    NOT_DUPLICATE = "not_duplicate"
+    DB_HIT = "db_hit"
+    FS_HIT = "fs_hit"
+
+
 class DownloadStatus(enum.Enum):
     """Result of a download attempt."""
 

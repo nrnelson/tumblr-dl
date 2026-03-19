@@ -15,7 +15,7 @@ from curl_cffi.requests import AsyncSession
 
 from tumblr_dl.dns import AsyncDNSCache
 from tumblr_dl.exceptions import DownloadError
-from tumblr_dl.models import DownloadStatus, MediaItem
+from tumblr_dl.models import DedupResult, DownloadStatus, MediaItem
 from tumblr_dl.tracker import DownloadTracker
 from tumblr_dl.utils import sanitize_filename
 
@@ -47,8 +47,12 @@ class DedupStrategy(abc.ABC):
     """
 
     @abc.abstractmethod
-    async def is_duplicate(self, item: MediaItem, dest: Path) -> bool:
-        """Return True if the item should be skipped."""
+    async def is_duplicate(self, item: MediaItem, dest: Path) -> DedupResult:
+        """Check whether the item is a duplicate.
+
+        Returns:
+            DedupResult indicating why (or that) the item is not a duplicate.
+        """
 
     @abc.abstractmethod
     async def record(
@@ -63,9 +67,11 @@ class DedupStrategy(abc.ABC):
 class FilesystemDedup(DedupStrategy):
     """Skip files that already exist on disk."""
 
-    async def is_duplicate(self, item: MediaItem, dest: Path) -> bool:
+    async def is_duplicate(self, item: MediaItem, dest: Path) -> DedupResult:
         """Check if the destination file already exists."""
-        return await asyncio.to_thread(dest.exists)
+        if await asyncio.to_thread(dest.exists):
+            return DedupResult.FS_HIT
+        return DedupResult.NOT_DUPLICATE
 
     async def record(
         self,
@@ -86,11 +92,22 @@ class SqliteDedup(DedupStrategy):
     def __init__(self, tracker: DownloadTracker) -> None:
         self._tracker = tracker
 
-    async def is_duplicate(self, item: MediaItem, dest: Path) -> bool:
-        """Check DB first, then filesystem as fallback."""
+    async def is_duplicate(self, item: MediaItem, dest: Path) -> DedupResult:
+        """Check DB first (with file verification), then filesystem fallback."""
         if await self._tracker.is_downloaded(item.blog_name, item.url):
-            return True
-        return await asyncio.to_thread(dest.exists)
+            # DB says this blog already downloaded this URL — verify file exists.
+            if await asyncio.to_thread(dest.exists):
+                return DedupResult.DB_HIT
+            # Stale DB record: file was deleted. Allow re-download.
+            logger.info(
+                "Stale DB record for %s (file missing): %s",
+                item.blog_name,
+                dest.name,
+            )
+            return DedupResult.NOT_DUPLICATE
+        if await asyncio.to_thread(dest.exists):
+            return DedupResult.FS_HIT
+        return DedupResult.NOT_DUPLICATE
 
     async def record(
         self,
@@ -98,7 +115,12 @@ class SqliteDedup(DedupStrategy):
         dest: Path,
         status: DownloadStatus,
     ) -> None:
-        """Record download result in the database."""
+        """Record download result in the database.
+
+        For filesystem-only duplicates (file exists but no DB record for
+        this blog), records a success entry so every blog that owns the
+        content is tracked.
+        """
         if status is DownloadStatus.SKIPPED:
             return
         tracker = self._tracker
@@ -326,8 +348,14 @@ async def download_item(
     """
     dest = _resolve_path(item, output_dir)
 
-    if await dedup.is_duplicate(item, dest):
-        logger.debug("Skipping (exists): %s", item.url)
+    dup_result = await dedup.is_duplicate(item, dest)
+    if dup_result is not DedupResult.NOT_DUPLICATE:
+        if dup_result is DedupResult.FS_HIT:
+            # File exists on disk but this blog has no DB record — record it.
+            await dedup.record(item, dest, DownloadStatus.SUCCESS)
+            logger.debug("Skipping (exists, recorded for blog): %s", item.url)
+        else:
+            logger.debug("Skipping (exists): %s", item.url)
         return DownloadStatus.SKIPPED, 0
 
     logger.info("Downloading: %s -> %s", item.url, dest.name)

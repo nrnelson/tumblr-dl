@@ -14,7 +14,7 @@ from tumblr_dl.downloader import (
     download_item,
 )
 from tumblr_dl.exceptions import DownloadError
-from tumblr_dl.models import DownloadStatus, MediaItem, MediaType
+from tumblr_dl.models import DedupResult, DownloadStatus, MediaItem, MediaType
 
 # --- Fixtures ---
 
@@ -56,13 +56,13 @@ def test_resolve_path_sanitizes_filename(tmp_path: Path) -> None:
 
 
 async def test_filesystem_dedup_detects_existing(tmp_path: Path) -> None:
-    """Existing file is detected as duplicate."""
+    """Existing file is detected as FS_HIT duplicate."""
     item = _make_item()
     dest = tmp_path / "photo1.jpg"
     dest.touch()
 
     dedup = FilesystemDedup()
-    assert await dedup.is_duplicate(item, dest) is True
+    assert await dedup.is_duplicate(item, dest) is DedupResult.FS_HIT
 
 
 async def test_filesystem_dedup_allows_new(tmp_path: Path) -> None:
@@ -71,7 +71,7 @@ async def test_filesystem_dedup_allows_new(tmp_path: Path) -> None:
     dest = tmp_path / "photo1.jpg"
 
     dedup = FilesystemDedup()
-    assert await dedup.is_duplicate(item, dest) is False
+    assert await dedup.is_duplicate(item, dest) is DedupResult.NOT_DUPLICATE
 
 
 async def test_filesystem_dedup_record_is_noop(tmp_path: Path) -> None:
@@ -85,23 +85,41 @@ async def test_filesystem_dedup_record_is_noop(tmp_path: Path) -> None:
 # --- download_item tests ---
 
 
-def _make_async_dedup(is_dup: bool = False) -> AsyncMock:
+def _make_async_dedup(
+    dup_result: DedupResult = DedupResult.NOT_DUPLICATE,
+) -> AsyncMock:
     """Create an AsyncMock dedup strategy."""
     dedup = AsyncMock(spec=DedupStrategy)
-    dedup.is_duplicate.return_value = is_dup
+    dedup.is_duplicate.return_value = dup_result
     return dedup
 
 
-async def test_download_item_skips_duplicate(tmp_path: Path) -> None:
-    """Duplicate items return SKIPPED without downloading."""
+async def test_download_item_skips_db_duplicate(tmp_path: Path) -> None:
+    """DB-hit duplicates return SKIPPED without downloading or recording."""
     item = _make_item()
-    dedup = _make_async_dedup(is_dup=True)
+    dedup = _make_async_dedup(dup_result=DedupResult.DB_HIT)
 
     status, byte_count = await download_item(item, tmp_path, dedup)
 
     assert status is DownloadStatus.SKIPPED
     assert byte_count == 0
     dedup.record.assert_not_called()
+
+
+async def test_download_item_skips_fs_duplicate_and_records(
+    tmp_path: Path,
+) -> None:
+    """FS-hit duplicates return SKIPPED but record a success entry."""
+    item = _make_item()
+    dedup = _make_async_dedup(dup_result=DedupResult.FS_HIT)
+
+    status, byte_count = await download_item(item, tmp_path, dedup)
+
+    assert status is DownloadStatus.SKIPPED
+    assert byte_count == 0
+    dedup.record.assert_called_once()
+    _, _, recorded_status = dedup.record.call_args[0]
+    assert recorded_status is DownloadStatus.SUCCESS
 
 
 async def test_download_item_success(tmp_path: Path) -> None:
