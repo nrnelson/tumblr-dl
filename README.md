@@ -202,7 +202,7 @@ Runs all `[blog.*]` sections from your config file. CLI flags override config va
 | `-o`, `--output-dir DIR` | `tumblr_downloads/` | Directory to save downloaded media |
 | `--config PATH` | auto-discovered | Path to TOML config file (overrides `TUMBLR_DL_CONFIG` env var) |
 | `--start-post N` | `0` | Post offset to start downloading from |
-| `--max-posts N` | *(all)* | Maximum number of posts to process |
+| `--max-posts N` | *(all)* | Maximum number of posts to process (see note below) |
 | `--db-path PATH` | `<output_dir>/.tumblr-dl.db` | SQLite database location |
 | `--no-db` | off | Disable SQLite tracking; use filesystem-only dedup |
 | `--full-scan` | off | Ignore stored cursor; scan the entire blog |
@@ -217,6 +217,15 @@ Runs all `[blog.*]` sections from your config file. CLI flags override config va
 | `--log-file PATH` | off | Write debug-level logs to a specific file |
 
 CLI flags override values from the config file when explicitly provided.
+
+> **Note on `--max-posts` and incremental sync:** `--max-posts` limits how many
+> posts are processed *per run*, starting from the newest. The incremental sync
+> cursor is set to the highest post ID seen during that run. On the next run,
+> only posts *newer* than the cursor are fetched — older posts that fell beyond
+> the `--max-posts` limit are **not** revisited. In other words, `--max-posts 50`
+> means "only ever download the 50 newest posts," not "download 50 at a time
+> across multiple runs." To download an entire blog, omit `--max-posts`. To
+> re-process older posts after using `--max-posts`, use `--full-scan`.
 
 ### Examples
 
