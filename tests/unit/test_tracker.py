@@ -180,3 +180,60 @@ async def test_get_failed_downloads_empty_when_none(
     """Returns empty list when no failures exist."""
     failed = await tracker.get_failed_downloads("myblog")
     assert failed == []
+
+
+# --- Full-scan progress ---
+
+
+async def test_full_scan_offset_none_by_default(
+    tracker: DownloadTracker,
+) -> None:
+    """No full-scan offset for a new blog."""
+    assert await tracker.get_full_scan_offset("newblog") is None
+
+
+async def test_full_scan_offset_none_after_blog_state_created(
+    tracker: DownloadTracker,
+) -> None:
+    """Blog with state but no active scan returns None."""
+    await tracker.update_blog_state("myblog", 100, 170000, 5)
+    assert await tracker.get_full_scan_offset("myblog") is None
+
+
+async def test_update_and_get_full_scan_offset(
+    tracker: DownloadTracker,
+) -> None:
+    """Full-scan offset is persisted and retrievable."""
+    await tracker.update_full_scan_offset("myblog", 500)
+    assert await tracker.get_full_scan_offset("myblog") == 500
+
+
+async def test_update_full_scan_offset_overwrites(
+    tracker: DownloadTracker,
+) -> None:
+    """Subsequent updates overwrite the offset."""
+    await tracker.update_full_scan_offset("myblog", 100)
+    await tracker.update_full_scan_offset("myblog", 300)
+    assert await tracker.get_full_scan_offset("myblog") == 300
+
+
+async def test_clear_full_scan_offset(
+    tracker: DownloadTracker,
+) -> None:
+    """Clearing resets offset to None."""
+    await tracker.update_full_scan_offset("myblog", 500)
+    await tracker.clear_full_scan_offset("myblog")
+    assert await tracker.get_full_scan_offset("myblog") is None
+
+
+async def test_full_scan_offset_independent_of_blog_state(
+    tracker: DownloadTracker,
+) -> None:
+    """Full-scan offset doesn't interfere with normal cursor."""
+    await tracker.update_blog_state("myblog", 100, 170000, 5)
+    await tracker.update_full_scan_offset("myblog", 500)
+
+    state = await tracker.get_blog_state("myblog")
+    assert state is not None
+    assert state.highest_post_id == 100
+    assert await tracker.get_full_scan_offset("myblog") == 500

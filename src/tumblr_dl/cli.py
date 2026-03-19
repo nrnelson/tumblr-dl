@@ -489,6 +489,16 @@ async def _download_blog(
                 last_known_ts,
             )
 
+    # Resume a previously interrupted full-scan.
+    if full_scan and tracker and start_offset == 0:
+        saved_offset = await tracker.get_full_scan_offset(blog_name)
+        if saved_offset is not None and saved_offset > 0:
+            start_offset = saved_offset
+            logger.info(
+                "Resuming full scan from offset %d (previously interrupted).",
+                start_offset,
+            )
+
     run_highest_id = 0
     run_newest_ts = 0
     queue: asyncio.Queue[list[MediaItem] | None] = asyncio.Queue(
@@ -567,6 +577,11 @@ async def _download_blog(
                     break
 
                 offset += _BATCH_SIZE
+
+                # Save full-scan progress so we can resume after
+                # interruption (ctrl+c, rate-limit abort, etc.).
+                if full_scan and tracker:
+                    await tracker.update_full_scan_offset(blog_name, offset)
         finally:
             with contextlib.suppress(asyncio.CancelledError):
                 await queue.put(None)
@@ -596,6 +611,10 @@ async def _download_blog(
             blog_name, new_highest, new_ts, stats.posts_processed
         )
         logger.debug("Updated blog cursor: highest_post_id=%d", new_highest)
+        # Full scan completed — clear the resume offset.
+        if full_scan:
+            await tracker.clear_full_scan_offset(blog_name)
+            logger.debug("Full scan complete for %s, cleared resume offset.", blog_name)
 
     return stats
 

@@ -18,12 +18,13 @@ _SCHEMA_VERSION = 1
 # Full schema for fresh databases.
 _SCHEMA_SQL = """\
 CREATE TABLE IF NOT EXISTS blog_state (
-    blog_name        TEXT PRIMARY KEY,
-    highest_post_id  INTEGER NOT NULL DEFAULT 0,
-    newest_timestamp INTEGER NOT NULL DEFAULT 0,
-    total_posts_seen INTEGER NOT NULL DEFAULT 0,
-    last_run_at      TEXT NOT NULL DEFAULT (datetime('now')),
-    created_at       TEXT NOT NULL DEFAULT (datetime('now'))
+    blog_name          TEXT PRIMARY KEY,
+    highest_post_id    INTEGER NOT NULL DEFAULT 0,
+    newest_timestamp   INTEGER NOT NULL DEFAULT 0,
+    total_posts_seen   INTEGER NOT NULL DEFAULT 0,
+    last_run_at        TEXT NOT NULL DEFAULT (datetime('now')),
+    created_at         TEXT NOT NULL DEFAULT (datetime('now')),
+    full_scan_offset   INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS downloads (
@@ -239,6 +240,43 @@ class DownloadTracker:
             "total_posts_seen = total_posts_seen + excluded.total_posts_seen, "
             "last_run_at = datetime('now')",
             (blog_name, highest_post_id, newest_timestamp, posts_delta),
+        )
+        await conn.commit()
+
+    # --- Full-scan progress ---
+
+    async def get_full_scan_offset(self, blog_name: str) -> int | None:
+        """Return the saved full-scan offset, or None if no scan in progress."""
+        conn = self._ensure_conn()
+        cursor = await conn.execute(
+            "SELECT full_scan_offset FROM blog_state WHERE blog_name = ?",
+            (blog_name,),
+        )
+        row = await cursor.fetchone()
+        if row is None or row[0] is None:
+            return None
+        return int(row[0])
+
+    async def update_full_scan_offset(
+        self, blog_name: str, offset: int,
+    ) -> None:
+        """Save progress for a full-scan so it can resume after interruption."""
+        conn = self._ensure_conn()
+        await conn.execute(
+            "INSERT INTO blog_state (blog_name, full_scan_offset) "
+            "VALUES (?, ?) "
+            "ON CONFLICT(blog_name) DO UPDATE SET full_scan_offset = ?",
+            (blog_name, offset, offset),
+        )
+        await conn.commit()
+
+    async def clear_full_scan_offset(self, blog_name: str) -> None:
+        """Clear the full-scan offset after a scan completes."""
+        conn = self._ensure_conn()
+        await conn.execute(
+            "UPDATE blog_state SET full_scan_offset = NULL "
+            "WHERE blog_name = ?",
+            (blog_name,),
         )
         await conn.commit()
 
