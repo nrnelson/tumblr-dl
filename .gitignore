@@ -28,6 +28,7 @@ Thumbs.db
 
 # Project-specific
 *.db
+.coverage
 downloads/
 *.lsv
 *.bin
